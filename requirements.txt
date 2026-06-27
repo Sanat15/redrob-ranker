@@ -1,0 +1,7 @@
+# No external dependencies for the rule-based ranker v1
+# Everything runs on Python 3.10+ standard library + json/csv/gzip
+
+# Optional — uncomment for Day 4 semantic enhancement
+# sentence-transformers==2.7.0
+# torch==2.3.0  # CPU-only build
+# numpy==1.26.4
