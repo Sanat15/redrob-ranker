@@ -634,6 +634,14 @@ def score_candidate(candidate: dict) -> dict:
         WEIGHTS["education"]    * ed
     )
 
+    # Soft salary fit — Redrob Series A budget is approximately 25-70 LPA.
+    salary = candidate.get("redrob_signals", {}).get("expected_salary_range_inr_lpa", {})
+    salary_max = salary.get("max", 40)
+    if salary_max > 85:
+        base *= 0.93   # above likely budget ceiling
+    elif salary_max < 8:
+        base *= 0.95   # suspiciously low — possible data error or very junior
+
     bm = behavioral_multiplier(candidate)
     final = min(1.0, base * bm)   # cap at 1.0
 
