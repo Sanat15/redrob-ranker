@@ -46,44 +46,34 @@ def load_candidates(path: str):
                 print(f"  Warning: skipping malformed line {count}: {e}", file=sys.stderr)
 
 
-def rank_candidates(candidates_path: str, top_n: int = 100) -> list[dict]:
-    """
-    Score all candidates and return top N sorted by score descending.
-    Uses a streaming approach — never loads all 100K into memory as scored objects.
-    """
-    # We keep only the top N during streaming using a simple list + min-heap
-    # For 100K candidates at ~1KB each unscored, this is fine.
-    # Scores are cheap (pure Python math), so we can store all scored results.
+import heapq
 
+def rank_candidates(candidates_path, top_n=100):
+    heap = []
+    
     print("Scoring candidates...", file=sys.stderr)
     t0 = time.time()
-
-    scored = []
-    for i, candidate in enumerate(load_candidates(candidates_path)):
+    
+    for candidate in load_candidates(candidates_path):
         result = score_candidate(candidate)
-        scored.append({
+        score = result["score"]
+        entry = {
             "candidate_id": candidate["candidate_id"],
-            "score": result["score"],
+            "score": score,
             "reasoning": result["reasoning"],
             "is_honeypot": result["is_honeypot"],
-        })
+        }
+        if len(heap) < top_n:
+            heapq.heappush(heap, (score, candidate["candidate_id"], entry))
+        elif score > heap[0][0]:
+            heapq.heapreplace(heap, (score, candidate["candidate_id"], entry))
 
     elapsed = time.time() - t0
-    print(f"Scored {len(scored):,} candidates in {elapsed:.1f}s", file=sys.stderr)
+    print(f"Scored in {elapsed:.1f}s", file=sys.stderr)
 
-    # Sort by score descending; tie-break by candidate_id ascending (as per spec)
-    scored.sort(key=lambda x: (-x["score"], x["candidate_id"]))
-
-    top = scored[:top_n]
-
-    # Log honeypot rate in top 100 for self-check
-    honeypots_in_top = sum(1 for c in top if c["is_honeypot"])
-    print(f"Honeypots in top {top_n}: {honeypots_in_top} ({honeypots_in_top}%)", file=sys.stderr)
-    if honeypots_in_top > 10:
-        print("WARNING: honeypot rate > 10% — submission will be disqualified at Stage 3!", file=sys.stderr)
-
-    return top
-
+    # Sort descending, tie-break candidate_id ascending
+    top = sorted(heap, key=lambda x: (-x[0], x[1]))
+    return [x[2] for x in top]
 
 def write_submission(ranked: list[dict], output_path: str) -> None:
     """Write the submission CSV in the format required by submission_spec."""

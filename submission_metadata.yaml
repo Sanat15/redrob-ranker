@@ -7,9 +7,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Identity ──────────────────────────────────────────────────────────────────
-team_name: ""                          # e.g. "Team Redrob Ranker"
-participant_id: ""                     # from the H2S portal — this is your team_xxx
-submission_file: "team_xxx.csv"        # must match participant_id above
+team_name: "Team Yaks"                         
+participant_id: "team_yaks"                     # from the H2S portal — this is your team_xxx
+submission_file: "team_yaks.csv"        # must match participant_id above
 
 team_members:
   - name: ""                           # Person A full name
@@ -21,7 +21,7 @@ team_members:
 
 # ── Links ─────────────────────────────────────────────────────────────────────
 github_repo: "https://github.com/Sanat15/redrob-ranker"
-sandbox_url: ""                        # Fill after Streamlit Cloud deploy
+sandbox_url: "https://redrob-ranker-yzva3g7w7d9mkg52simzn4.streamlit.app/"
 
 # ── Approach ──────────────────────────────────────────────────────────────────
 approach_summary: >
