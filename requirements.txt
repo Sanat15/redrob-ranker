@@ -1,7 +1,10 @@
-# No external dependencies for the rule-based ranker v1
-# Everything runs on Python 3.10+ standard library + json/csv/gzip
+# Redrob Hackathon — Python dependencies
+#
+# Core ranking pipeline (scorer.py, rank.py) uses ONLY the standard library.
+# No external packages are needed for the actual ranking — this satisfies the
+# "no network during ranking" constraint trivially.
+#
+# The two packages below are for the Streamlit sandbox (app.py) only.
 
-# Optional — uncomment for Day 4 semantic enhancement
-# sentence-transformers==2.7.0
-# torch==2.3.0  # CPU-only build
-# numpy==1.26.4
+streamlit>=1.28.0
+pandas>=2.0.0
