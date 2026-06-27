@@ -1,0 +1,65 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Redrob Hackathon — Submission Metadata
+# Challenge: Intelligent Candidate Discovery & Ranking
+# Platform: Hack2Skill (H2S)
+#
+# Fill in ALL fields before Submission 2 (Day 5). No placeholder values.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Identity ──────────────────────────────────────────────────────────────────
+team_name: ""                          # e.g. "Team Redrob Ranker"
+participant_id: ""                     # from the H2S portal — this is your team_xxx
+submission_file: "team_xxx.csv"        # must match participant_id above
+
+team_members:
+  - name: ""                           # Person A full name
+    role: "Scoring Architecture & Algorithm Design"
+    github: ""                         # github username
+  - name: "Sanat"                      # Person B (you)
+    role: "Infrastructure, Pipeline & Sandbox"
+    github: "Sanat15"
+
+# ── Links ─────────────────────────────────────────────────────────────────────
+github_repo: "https://github.com/Sanat15/redrob-ranker"
+sandbox_url: ""                        # Fill after Streamlit Cloud deploy
+
+# ── Approach ──────────────────────────────────────────────────────────────────
+approach_summary: >
+  Rule-based scoring pipeline with five weighted components and a behavioral
+  multiplier. We process 100K candidates using a streaming heapq (O(N log K),
+  constant memory) without any external API calls. Skills are scored via a
+  trust formula (proficiency × endorsements / 25 × duration_months / 18) that
+  defeats keyword stuffing — an expert skill with 0 months of usage scores 0,
+  not 1. Career history descriptions are deliberately NOT scanned because they
+  are recycled template blocks in this dataset; we rely on the skills array and
+  redrob_signals instead. Honeypots are detected and scored 0.01 before any
+  component computation runs.
+
+key_design_decisions:
+  - "No career description scanning — descriptions are recycled templates"
+  - "Trust formula on skills — proficiency × endorsements × duration_months"
+  - "Behavioral multiplier is multiplicative, not additive"
+  - "Consulting-firm career modifier ×0.4 encodes JD disqualifier directly"
+  - "heapq O(N log K) — only top-100 ever held in memory"
+  - "No external APIs or GPU — pure stdlib Python for the ranking pipeline"
+
+# ── Technical Specs ───────────────────────────────────────────────────────────
+python_version: "3.11"
+runtime_estimate_seconds: 90           # measured on CPU, 100K candidates
+ram_estimate_gb: 2                     # heapq keeps only top-100 in memory
+uses_gpu: false
+uses_external_api_during_ranking: false
+uses_pretrained_model: false
+
+# ── Scoring Weights ───────────────────────────────────────────────────────────
+component_weights:
+  title_career: 0.35
+  skills:       0.30
+  experience:   0.15
+  location:     0.10
+  education:    0.10
+
+behavioral_multiplier_range: "0.25 – 1.10"
+
+# ── Reproduce Command ─────────────────────────────────────────────────────────
+reproduce_command: "python rank.py --candidates candidates.jsonl.gz --out team_xxx.csv"
