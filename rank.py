@@ -9,10 +9,10 @@ Constraints respected:
 - < 5 minutes on 16GB RAM for 100K candidates
 - Produces validate_submission.py-passing CSV
 """
-
 import argparse
 import csv
 import gzip
+import heapq
 import json
 import sys
 import time
@@ -46,22 +46,29 @@ def load_candidates(path: str):
                 print(f"  Warning: skipping malformed line {count}: {e}", file=sys.stderr)
 
 
-import heapq
-
 def rank_candidates(candidates_path, top_n=100):
     heap = []
-    
     print("Scoring candidates...", file=sys.stderr)
     t0 = time.time()
-    
+
     for candidate in load_candidates(candidates_path):
         result = score_candidate(candidate)
         score = result["score"]
+
+        # NEW (Day 2 → Day 3 handoff item from person_a_day2_progress.md §3):
+        # saved_by_recruiters_30d is used ONLY as a sort tiebreaker, never as a
+        # score multiplier. As a multiplier it tied 10 candidates at exactly
+        # 1.0000 (1.10 github bonus × 1.08 saved bonus on a 0.90 base, capped
+        # at 1.0), which collapsed top-10 ordering to alphabetical-by-id —
+        # the worst possible outcome given NDCG@10 is 50% of the score.
+        saved_30d = candidate.get("redrob_signals", {}).get("saved_by_recruiters_30d", 0)
+
         entry = {
             "candidate_id": candidate["candidate_id"],
             "score": score,
             "reasoning": result["reasoning"],
             "is_honeypot": result["is_honeypot"],
+            "saved_30d": saved_30d,
         }
         if len(heap) < top_n:
             heapq.heappush(heap, (score, candidate["candidate_id"], entry))
@@ -71,9 +78,11 @@ def rank_candidates(candidates_path, top_n=100):
     elapsed = time.time() - t0
     print(f"Scored in {elapsed:.1f}s", file=sys.stderr)
 
-    # Sort descending, tie-break candidate_id ascending
-    top = sorted(heap, key=lambda x: (-x[0], x[1]))
+    # Sort: score descending -> saved_by_recruiters_30d descending (tiebreaker)
+    # -> candidate_id ascending (final tiebreaker, per spec).
+    top = sorted(heap, key=lambda x: (-x[0], -x[2].get("saved_30d", 0), x[1]))
     return [x[2] for x in top]
+
 
 def write_submission(ranked: list[dict], output_path: str) -> None:
     """Write the submission CSV in the format required by submission_spec."""
@@ -84,12 +93,11 @@ def write_submission(ranked: list[dict], output_path: str) -> None:
         writer = csv.writer(f)
         writer.writerow(["candidate_id", "rank", "score", "reasoning"])
 
-        # Assign ranks 1–100; ensure scores are non-increasing
+        # Assign ranks 1-100; ensure scores are non-increasing
         prev_score = None
         for i, entry in enumerate(ranked):
             rank = i + 1
             score = entry["score"]
-
             # Enforce non-increasing score (spec requirement)
             if prev_score is not None and score > prev_score:
                 score = prev_score
@@ -120,9 +128,9 @@ def main():
 
     total = time.time() - t_start
     print(f"Done in {total:.1f}s total", file=sys.stderr)
-    print(f"Top 5 preview:", file=sys.stderr)
-    for entry in ranked[:5]:
-        print(f"  #{ranked.index(entry)+1} {entry['candidate_id']} | score={entry['score']:.4f}", file=sys.stderr)
+    print("Top 5 preview:", file=sys.stderr)
+    for i, entry in enumerate(ranked[:5], 1):
+        print(f"  #{i} {entry['candidate_id']} | score={entry['score']:.4f}", file=sys.stderr)
 
 
 if __name__ == "__main__":

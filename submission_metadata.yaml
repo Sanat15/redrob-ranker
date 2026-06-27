@@ -7,14 +7,14 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Identity ──────────────────────────────────────────────────────────────────
-team_name: "Team Yaks"                         
+team_name: "Team Yaks"
 participant_id: "team_yaks"                     # from the H2S portal — this is your team_xxx
-submission_file: "team_yaks.csv"        # must match participant_id above
+submission_file: "team_yaks.csv"                 # must match participant_id above
 
 team_members:
-  - name: ""                           # Person A full name
+  - name: ""                           # TODO — Person A full name (still blank, confirm with teammate)
     role: "Scoring Architecture & Algorithm Design"
-    github: ""                         # github username
+    github: ""                         # TODO — Person A GitHub username (still blank)
   - name: "Sanat"                      # Person B (you)
     role: "Infrastructure, Pipeline & Sandbox"
     github: "Sanat15"
@@ -41,12 +41,16 @@ key_design_decisions:
   - "Behavioral multiplier is multiplicative, not additive"
   - "Consulting-firm career modifier ×0.4 encodes JD disqualifier directly"
   - "heapq O(N log K) — only top-100 ever held in memory"
+  - "saved_by_recruiters_30d used as a sort tiebreaker only, never a score multiplier"
   - "No external APIs or GPU — pure stdlib Python for the ranking pipeline"
 
 # ── Technical Specs ───────────────────────────────────────────────────────────
 python_version: "3.11"
-runtime_estimate_seconds: 90           # measured on CPU, 100K candidates
-ram_estimate_gb: 2                     # heapq keeps only top-100 in memory
+runtime_estimate_seconds: 15          # measured 10-13s on CPU for the full 100K candidates
+                                       # (diagnose.py: 10.0s; direct scorer.py run: 12.7s);
+                                       # 15s leaves headroom for slower grading hardware.
+                                       # Budget is 300s (5 min) — well within limit.
+ram_estimate_gb: 2                    # heapq keeps only top-100 in memory
 uses_gpu: false
 uses_external_api_during_ranking: false
 uses_pretrained_model: false
@@ -54,12 +58,15 @@ uses_pretrained_model: false
 # ── Scoring Weights ───────────────────────────────────────────────────────────
 component_weights:
   title_career: 0.35
-  skills:       0.30
-  experience:   0.15
-  location:     0.10
-  education:    0.10
-
+  skills: 0.30
+  experience: 0.15
+  location: 0.10
+  education: 0.10
 behavioral_multiplier_range: "0.25 – 1.10"
 
 # ── Reproduce Command ─────────────────────────────────────────────────────────
-reproduce_command: "python rank.py --candidates candidates.jsonl.gz --out team_xxx.csv"
+# NOTE: fixed below. The hackathon bundle ships candidates.jsonl (uncompressed,
+# ~465MB), not candidates.jsonl.gz — confirmed in person_b_day1_progress.md
+# Issue 2. load_candidates() handles both via the .gz suffix check, but the
+# command here must match what's actually in the bundle.
+reproduce_command: "python rank.py --candidates candidates.jsonl --out team_yaks.csv"
