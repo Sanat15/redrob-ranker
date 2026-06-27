@@ -206,7 +206,7 @@ submission PDF deck.
 | Member | Role |
 |---|---|
 | **Sanat** ([@Sanat15](https://github.com/Sanat15)) | Infrastructure, pipeline, sandbox, submission mechanics |
-| *(Person A)* | Scoring architecture & algorithm design |
+| **Tushar** ([@IITI-tushar](https://github.com/IITI-tushar)| Scoring architecture & algorithm design |
 
 ## License
 
