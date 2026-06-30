@@ -9,6 +9,7 @@ from scorer import (
     is_honeypot,
     title_career_score,
     skills_score,
+    production_evidence_score,
     experience_score,
     location_score,
     education_score,
@@ -325,6 +326,60 @@ class TestSkillsScore:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Production evidence score
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestProductionEvidenceScore:
+
+    def test_all_categories_in_current_job_score_one(self):
+        c = make_candidate(career=[{
+            "company": "Swiggy",
+            "title": "Ranking Systems Engineer",
+            "duration_months": 60,
+            "is_current": True,
+            "industry": "Technology",
+            "company_size": "1001-5000",
+            "description": (
+                "Owned and deployed semantic search with offline evaluation, "
+                "NDCG calibration, p99 latency monitoring, and index refresh."
+            ),
+        }])
+        assert production_evidence_score(c) == pytest.approx(1.0)
+
+    def test_repeated_terms_count_once_per_category(self):
+        c = make_candidate(career=[{
+            "company": "Swiggy",
+            "title": "Ranking Ranking Ranking Engineer",
+            "duration_months": 60,
+            "is_current": True,
+            "industry": "Technology",
+            "company_size": "1001-5000",
+            "description": "Search, retrieval, ranking, search, retrieval.",
+        }])
+        assert production_evidence_score(c) == pytest.approx(0.25)
+
+    def test_older_job_evidence_is_recency_weighted(self):
+        c = make_candidate(career=[
+            {"company": "A", "title": "ML Engineer", "duration_months": 24,
+             "is_current": True, "description": ""},
+            {"company": "B", "title": "ML Engineer", "duration_months": 24,
+             "is_current": False, "description": "Built ranking in production."},
+        ])
+        # Two categories (relevant system + ownership + operational), each at 0.7.
+        assert production_evidence_score(c) == pytest.approx(3 * 0.7 / 4)
+
+    def test_search_does_not_match_research(self):
+        c = make_candidate(career=[{
+            "company": "Swiggy",
+            "title": "Research Engineer",
+            "duration_months": 60,
+            "is_current": True,
+            "description": "",
+        }])
+        assert production_evidence_score(c) == 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Experience score
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -445,16 +500,16 @@ class TestBehavioralMultiplier:
             "github_activity_score": 75
         })
         assert behavioral_multiplier(gh_high) > behavioral_multiplier(no_gh)
-        # Should be at least 1.10× when all else is equal
+        # ≥60 tier: ×1.05 (lowered from 1.10 to prevent top-candidate score cap)
         ratio = behavioral_multiplier(gh_high) / behavioral_multiplier(no_gh)
-        assert ratio >= 1.10
+        assert ratio >= 1.05
 
     def test_moderate_github_gives_smaller_bonus(self):
-        """github 30–59 → ×1.05"""
+        """github 30–59 → ×1.03"""
         no_gh  = make_candidate(signals={**make_candidate()["redrob_signals"], "github_activity_score": -1})
         gh_mid = make_candidate(signals={**make_candidate()["redrob_signals"], "github_activity_score": 45})
         ratio = behavioral_multiplier(gh_mid) / behavioral_multiplier(no_gh)
-        assert ratio >= 1.05
+        assert ratio >= 1.03
 
     def test_low_interview_completion_penalized(self):
         """New signal: interview_completion_rate < 0.4 → ×0.85"""
@@ -517,6 +572,42 @@ class TestScoreCandidate:
         assert result["is_honeypot"] is True
         assert result["score"] <= 0.02
         assert result["components"] == {}
+
+    def test_production_evidence_bonus_is_gated_and_capped(self):
+        strong_skills = [
+            {"name": name, "proficiency": "expert", "endorsements": 30,
+             "duration_months": 36}
+            for name in ["Python", "Embeddings", "Pinecone",
+                         "Information Retrieval", "BM25"]
+        ]
+        evidence_career = [{
+            "company": "Swiggy",
+            "title": "Ranking Systems Engineer",
+            "duration_months": 72,
+            "is_current": True,
+            "industry": "Technology",
+            "company_size": "1001-5000",
+            "description": (
+                "Owned and deployed semantic search with offline evaluation, "
+                "NDCG calibration, p99 latency monitoring, and index refresh."
+            ),
+        }]
+        without_evidence = make_candidate(skills=strong_skills)
+        with_evidence = make_candidate(skills=strong_skills, career=evidence_career)
+
+        plain = score_candidate(without_evidence)
+        boosted = score_candidate(with_evidence)
+        assert boosted["components"]["production_evidence"] == 1.0
+        # Default fixture github=45 → ×1.03 (moderate tier).
+        assert boosted["score"] - plain["score"] == pytest.approx(0.07 * 1.03)
+
+        weak = make_candidate(
+            title="Software Engineer",
+            skills=[],
+            career=evidence_career,
+        )
+        weak_result = score_candidate(weak)
+        assert weak_result["components"]["production_evidence"] == 0.0
 
     def test_strong_ml_engineer_scores_above_0_6(self):
         """A genuine AI engineer with strong signals should score well."""

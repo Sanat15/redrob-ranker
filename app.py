@@ -76,25 +76,28 @@ tab_rank, tab_how = st.tabs(["📊 Upload & Rank", "📖 How It Works"])
 with tab_rank:
 
     st.markdown(
-        "Upload a JSON file of up to **100 candidate profiles**. "
+        "Upload a **JSON** or **JSONL** file of up to **100 candidate profiles**. "
         "Use `sample_candidates.json` from the hackathon bundle for a quick demo."
     )
 
     uploaded = st.file_uploader(
-        "Choose a JSON file",
-        type=["json"],
-        help="Format: list of candidate objects, or a single candidate object.",
+        "Choose a JSON or JSONL file",
+        type=["json", "jsonl"],
+        help="JSON: list of candidate objects. JSONL: one candidate per line (first 100 lines used).",
     )
 
     if uploaded:
         # ── Load ────────────────────────────────────────────
         try:
-            raw = json.load(uploaded)
-        except json.JSONDecodeError:
-            st.error("❌ Invalid JSON. Please upload a valid `.json` file.")
+            if uploaded.name.endswith(".jsonl"):
+                lines = uploaded.read().decode("utf-8").splitlines()
+                candidates = [json.loads(l) for l in lines if l.strip()]
+            else:
+                raw = json.loads(uploaded.read().decode("utf-8"))
+                candidates = [raw] if isinstance(raw, dict) else raw
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            st.error(f"❌ Could not parse file: {e}")
             st.stop()
-
-        candidates = [raw] if isinstance(raw, dict) else raw
 
         if len(candidates) > 100:
             st.warning(f"⚠️ {len(candidates)} profiles uploaded — scoring first 100 only.")
@@ -350,6 +353,12 @@ with tab_how:
 
     #### Component 5 — Education (10%)
     Institution tier + CS field bonus. Weak signal — the JD has no educational requirements.
+
+    #### Production Evidence Bonus (up to +0.07)
+    Qualified candidates (`title/career ≥ 0.60` and `skills ≥ 0.35`) receive a
+    category-based bonus for concrete evidence of relevant systems, evaluation,
+    ownership, and production operations. Categories count once and are weighted
+    by job recency (current 1.0, second 0.7, older 0.4).
 
     ---
     #### Behavioral Multiplier (multiplicative, 0.25× – 1.1×)

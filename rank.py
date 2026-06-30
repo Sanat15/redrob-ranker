@@ -78,9 +78,8 @@ def rank_candidates(candidates_path, top_n=100):
     elapsed = time.time() - t0
     print(f"Scored in {elapsed:.1f}s", file=sys.stderr)
 
-    # Sort: score descending -> saved_by_recruiters_30d descending (tiebreaker)
-    # -> candidate_id ascending (final tiebreaker, per spec).
-    top = sorted(heap, key=lambda x: (-x[0], -x[2].get("saved_30d", 0), x[1]))
+    # Sort: score descending -> candidate_id ascending (per spec tie-break rule).
+    top = sorted(heap, key=lambda x: (-x[0], x[1]))
     return [x[2] for x in top]
 
 

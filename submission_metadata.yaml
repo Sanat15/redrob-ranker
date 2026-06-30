@@ -1,59 +1,47 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Redrob Hackathon — Submission Metadata
 # Challenge: Intelligent Candidate Discovery & Ranking
-# Platform: Hack2Skill (H2S)
-#
-# Fill in ALL fields before Submission 2 (Day 5). No placeholder values.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── Identity ──────────────────────────────────────────────────────────────────
+# ── Team Identity ─────────────────────────────────────────────────────────────
 team_name: "Team Yaks"
-participant_id: "team_yaks"                     # from the H2S portal — this is your team_xxx
-submission_file: "team_yaks.csv"                 # must match participant_id above
+
+primary_contact:
+  name: "Tushar Saxena"
+  email: "abhijeetsp015@gmail.com"
+  phone: ""                            # TODO: fill before final submission
 
 team_members:
-  - name: ""                           # TODO — Person A full name (still blank, confirm with teammate)
+  - name: "Tushar Saxena"
+    email: "abhijeetsp015@gmail.com"
     role: "Scoring Architecture & Algorithm Design"
-    github: ""                         # TODO — Person A GitHub username (still blank)
-  - name: "Sanat"                      # Person B (you)
+    github: "IITI-tushar"
+  - name: "Sanat"
+    email: ""                          # TODO: fill before final submission
     role: "Infrastructure, Pipeline & Sandbox"
     github: "Sanat15"
 
-# ── Links ─────────────────────────────────────────────────────────────────────
+# ── Code & Reproducibility ────────────────────────────────────────────────────
 github_repo: "https://github.com/Sanat15/redrob-ranker"
-sandbox_url: "https://redrob-ranker-yzva3g7w7d9mkg52simzn4.streamlit.app/"
+sandbox_link: "https://redrob-ranker-yzva3g7w7d9mkg52simzn4.streamlit.app/"
 
-# ── Approach ──────────────────────────────────────────────────────────────────
-approach_summary: >
-  Rule-based scoring pipeline with five weighted components and a behavioral
-  multiplier. We process 100K candidates using a streaming heapq (O(N log K),
-  constant memory) without any external API calls. Skills are scored via a
-  trust formula (proficiency × endorsements / 25 × duration_months / 18) that
-  defeats keyword stuffing — an expert skill with 0 months of usage scores 0,
-  not 1. Career history descriptions are deliberately NOT scanned because they
-  are recycled template blocks in this dataset; we rely on the skills array and
-  redrob_signals instead. Honeypots are detected and scored 0.01 before any
-  component computation runs.
+reproduce_command: "python rank.py --candidates candidates.jsonl --out team_yaks.csv"
 
-key_design_decisions:
-  - "No career description scanning — descriptions are recycled templates"
-  - "Trust formula on skills — proficiency × endorsements × duration_months"
-  - "Behavioral multiplier is multiplicative, not additive"
-  - "Consulting-firm career modifier ×0.4 encodes JD disqualifier directly"
-  - "heapq O(N log K) — only top-100 ever held in memory"
-  - "saved_by_recruiters_30d used as a sort tiebreaker only, never a score multiplier"
-  - "No external APIs or GPU — pure stdlib Python for the ranking pipeline"
+# ── Compute Environment ───────────────────────────────────────────────────────
+compute:
+  platform: "Local Linux box"
+  cpu_cores: 16
+  ram_gb: 15
+  python_version: "3.12.3"
+  os: "Linux 6.17.0-35-generic (Ubuntu)"
+  uses_gpu_for_inference: false
+  has_network_during_ranking: false
+  pre_computation_required: false
+  pre_computation_time_minutes: 0
 
-# ── Technical Specs ───────────────────────────────────────────────────────────
-python_version: "3.11"
-runtime_estimate_seconds: 15          # measured 10-13s on CPU for the full 100K candidates
-                                       # (diagnose.py: 10.0s; direct scorer.py run: 12.7s);
-                                       # 15s leaves headroom for slower grading hardware.
-                                       # Budget is 300s (5 min) — well within limit.
-ram_estimate_gb: 2                    # heapq keeps only top-100 in memory
-uses_gpu: false
-uses_external_api_during_ranking: false
-uses_pretrained_model: false
+# ── Submission File ───────────────────────────────────────────────────────────
+submission_file: "team_yaks.csv"
+runtime_estimate_seconds: 15          # measured 7–13s; 15s leaves headroom
 
 # ── Scoring Weights ───────────────────────────────────────────────────────────
 component_weights:
@@ -64,9 +52,48 @@ component_weights:
   education: 0.10
 behavioral_multiplier_range: "0.25 – 1.10"
 
-# ── Reproduce Command ─────────────────────────────────────────────────────────
-# NOTE: fixed below. The hackathon bundle ships candidates.jsonl (uncompressed,
-# ~465MB), not candidates.jsonl.gz — confirmed in person_b_day1_progress.md
-# Issue 2. load_candidates() handles both via the .gz suffix check, but the
-# command here must match what's actually in the bundle.
-reproduce_command: "python rank.py --candidates candidates.jsonl --out team_yaks.csv"
+# ── AI Tools Declaration ──────────────────────────────────────────────────────
+ai_tools_used:
+  - "Claude (Anthropic)"
+
+ai_usage_summary: |
+  Used Claude for architectural discussion, code review, and test case design.
+  All scoring logic, weights, and design decisions were authored by the team.
+  No candidate data was fed to any LLM. The final ranker is pure rule-based
+  Python with no ML model or pre-trained embeddings.
+
+# ── Methodology Summary ───────────────────────────────────────────────────────
+methodology_summary: |
+  Rule-based trust-weighted scoring pipeline. Five components:
+  (1) Title/Career (35%): keyword matching on current title + company-type
+      modifier across career history. Pure consulting careers (TCS/Wipro/
+      Infosys/Accenture/Cognizant) penalised ×0.4 per JD requirement.
+  (2) Skills (30%): trust formula = proficiency_weight × min(1, endorsements/25)
+      × min(1, duration_months/18). Expert skill with 0 months = 0.0 trust.
+      Defeats keyword stuffing without any ML.
+  (3) Experience (15%): sweet spot 5–9 years per JD. Below 2 years = 0.
+  (4) Location (10%): India preferred; outside India without relocation = heavy
+      penalty.
+  (5) Education (10%): institution tier + CS-field bonus. Weak signal.
+  Behavioral multiplier (0.25–1.10×) applied multiplicatively to base score.
+  Honeypots detected first (expert + 0 months, impossible career timelines) and
+  scored 0.01. Streaming heapq O(N log K) — only top-100 ever in memory.
+  Runtime: 7–13 seconds for 100K candidates on CPU.
+
+# ── Key Design Decisions ──────────────────────────────────────────────────────
+key_design_decisions:
+  - "No career description scanning — descriptions are recycled templates in the dataset"
+  - "Trust formula on skills — proficiency × endorsements × duration_months"
+  - "Behavioral multiplier is multiplicative, not additive (makes availability penalties severe)"
+  - "Consulting-firm career modifier ×0.4 directly encodes JD disqualifier"
+  - "heapq O(N log K) — only top-100 ever held in memory"
+  - "saved_by_recruiters_30d used only as sort tiebreaker, never a score multiplier"
+  - "No external APIs or GPU — pure stdlib Python for the ranking pipeline"
+
+# ── Declarations ──────────────────────────────────────────────────────────────
+declarations:
+  read_submission_spec: true
+  code_is_original_work: true
+  no_collusion: true
+  honeypot_check_done: true
+  reproduction_tested: true

@@ -12,6 +12,7 @@ Changes from v1:
 """
 
 import math
+import re
 from datetime import date, datetime
 
 # ─────────────────────────────────────────────
@@ -37,10 +38,21 @@ CORE_SKILLS = {
     "pinecone", "weaviate", "qdrant", "milvus", "faiss",
     "elasticsearch", "opensearch", "annoy", "chromadb", "pgvector",
 
-    # Ranking / IR
+    # Ranking / IR — specific algorithms
     "information retrieval", "ranking", "learning to rank",
     "learning-to-rank", "ltr", "bm25", "hybrid search",
     "reranking", "re-ranking",
+
+    # Ranking / IR — concept-level terms (same expertise, different vocabulary)
+    # A candidate listing "Ranking Systems" has identical relevance to one listing
+    # "Learning to Rank" — both describe building retrieval/ranking systems.
+    "ranking systems", "search systems", "search infrastructure",
+    "search backend", "search and discovery", "search & discovery",
+    "information retrieval systems",
+    "content matching", "candidate matching", "matching systems", "matching layer",
+    "vector representations", "text encoders",
+    "indexing algorithms", "indexing",
+    "dense ranking", "sparse ranking",
 
     # Retrieval architectures
     "bi-encoder", "bi encoder", "cross-encoder", "cross encoder",
@@ -113,6 +125,33 @@ SKILL_NORMALIZE = {
     "wandb": "weights & biases",
     "huggingface": "hugging face",
 }
+
+# ── Production evidence ──────────────────────────────────────────────────────
+# Career evidence that a qualified candidate has built and operated the systems
+# this JD requires. Matching is category-based so repeated keywords do not help.
+EVIDENCE_CATEGORIES = {
+    "relevant_systems": {
+        "ranking", "retrieval", "recommendation", "hybrid retrieval",
+        "semantic search", "candidate matching", "vector search",
+        "re-ranking", "reranking", "search",
+    },
+    "evaluation": {
+        "offline evaluation", "online evaluation", "ndcg", "mrr",
+        "a/b test", "ab test", "calibration", "evaluation framework",
+    },
+    "ownership": {
+        "owned", "designed", "built", "led", "shipped", "deployed",
+        "architected", "end-to-end", "end to end",
+    },
+    "operational": {
+        "latency", "throughput", "qps", "monitoring", "feature store",
+        "production", "index refresh", "p99", "sla",
+    },
+}
+
+PRODUCTION_EVIDENCE_MAX_BONUS = 0.07
+PRODUCTION_EVIDENCE_TC_GATE = 0.60
+PRODUCTION_EVIDENCE_SK_GATE = 0.35
 
 # ── Company lists ─────────────────────────────────────────────────────────────
 
@@ -210,8 +249,8 @@ EDUCATION_TIER_SCORES = {
     "tier_1": 1.0,
     "tier_2": 0.75,
     "tier_3": 0.5,
-    "tier_4": 0.3,
-    "unknown": 0.4,
+    "tier_4": 0.2,
+    "unknown": 0.3,
 }
 
 CS_FIELDS = {
@@ -387,14 +426,14 @@ def title_career_score(candidate: dict) -> float:
         company_modifier = 0.85   # Unknown companies — neutral assumption
 
     # Industry signal (minor)
-    if any(k in current_industry for k in ("software", "ai", "ml", "saas", "technology")):
-        industry_modifier = 1.05
-    elif "it services" in current_industry:
-        industry_modifier = 0.9
-    else:
-        industry_modifier = 1.0
+    # if any(k in current_industry for k in ("software", "ai", "ml", "saas", "technology")):
+    #     industry_modifier = 1.05
+    # elif "it services" in current_industry:
+    #     industry_modifier = 0.9
+    # else:
+    #     industry_modifier = 1.0
 
-    score = base * company_modifier * industry_modifier
+    score = base * company_modifier #* industry_modifier
     return min(1.0, max(0.0, score))
 
 
@@ -442,6 +481,41 @@ def skills_score(candidate: dict) -> float:
     assessment_bonus = min(0.1, assessment_bonus)
 
     return min(1.0, core_score * 0.7 + niche_score * 0.3 + assessment_bonus)
+
+
+def _contains_evidence_term(text: str, term: str) -> bool:
+    """Match a complete term, avoiding false positives such as search/research."""
+    pattern = rf"(?<!\w){re.escape(term)}(?!\w)"
+    return re.search(pattern, text, flags=re.IGNORECASE) is not None
+
+
+def production_evidence_score(candidate: dict) -> float:
+    """
+    Return a 0–1 score for concrete production evidence in career history.
+
+    Each evidence category counts once, using the highest recency weight of a
+    matching job: current=1.0, second job=0.7, older jobs=0.4. Both job title
+    and description are considered.
+    """
+    career = candidate.get("career_history", [])
+    category_weights = {category: 0.0 for category in EVIDENCE_CATEGORIES}
+
+    for index, job in enumerate(career):
+        if job.get("is_current", False):
+            recency_weight = 1.0
+        elif index == 1:
+            recency_weight = 0.7
+        else:
+            recency_weight = 0.4
+
+        text = f"{job.get('title', '')} {job.get('description', '')}"
+        for category, terms in EVIDENCE_CATEGORIES.items():
+            if any(_contains_evidence_term(text, term) for term in terms):
+                category_weights[category] = max(
+                    category_weights[category], recency_weight
+                )
+
+    return sum(category_weights.values()) / len(EVIDENCE_CATEGORIES)
 
 
 def experience_score(candidate: dict) -> float:
@@ -541,19 +615,29 @@ def behavioral_multiplier(candidate: dict) -> float:
 
     # Notice period (JD prefers sub-30; can buy out up to 30 days)
     notice = signals.get("notice_period_days", 60)
-    if notice > 150:
-        multiplier *= 0.70
-    elif notice > 90:
-        multiplier *= 0.85
+    if notice <= 30:
+        pass                      # 1.00 — ideal
+    elif notice <= 60:
+        multiplier *= 0.97        # minor friction
+    elif notice <= 90:
+        multiplier *= 0.92        # moderate
+    elif notice <= 150:
+        multiplier *= 0.82        # significant
+    else:
+        multiplier *= 0.70        # same as current
+
 
     # ── Quality signals ───────────────────────────────────────────────────────
 
     # GitHub activity — positive signal for open-source contributions (JD nice-to-have)
+    # Tiers lowered from 1.10/1.05 to 1.05/1.03: the previous values were collapsing
+    # top-4 candidates at 1.0000 (high base × 1.10 > 1.0 cap), destroying NDCG@10
+    # differentiation. These values keep github as a meaningful signal without hitting the cap.
     github_score = signals.get("github_activity_score", -1)
     if github_score >= 60:
-        multiplier *= 1.10
-    elif github_score >= 30:
         multiplier *= 1.05
+    elif github_score >= 30:
+        multiplier *= 1.03
     # -1 means no GitHub linked → no bonus, no penalty
 
     # Interview reliability — do they actually show up?
@@ -634,6 +718,13 @@ def score_candidate(candidate: dict) -> dict:
         WEIGHTS["education"]    * ed
     )
 
+    # Refine only the qualified bracket with concrete, recent evidence of
+    # building and operating retrieval/ranking systems.
+    production_evidence = 0.0
+    if tc >= PRODUCTION_EVIDENCE_TC_GATE and sk >= PRODUCTION_EVIDENCE_SK_GATE:
+        production_evidence = production_evidence_score(candidate)
+        base += PRODUCTION_EVIDENCE_MAX_BONUS * production_evidence
+
     # Soft salary fit — Redrob Series A budget is approximately 25-70 LPA.
     salary = candidate.get("redrob_signals", {}).get("expected_salary_range_inr_lpa", {})
     salary_max = salary.get("max", 40)
@@ -655,6 +746,7 @@ def score_candidate(candidate: dict) -> dict:
             "experience":   round(ex, 3),
             "location":     round(lo, 3),
             "education":    round(ed, 3),
+            "production_evidence": round(production_evidence, 3),
         },
         "multiplier": round(bm, 3),
         "is_honeypot": False,
@@ -788,6 +880,7 @@ if __name__ == "__main__":
                   f"ex={comp.get('experience',0):.2f}  "
                   f"lo={comp.get('location',0):.2f}  "
                   f"ed={comp.get('education',0):.2f}  "
+                  f"pe={comp.get('production_evidence',0):.2f}  "
                   f"bm={r.get('multiplier',0):.2f}")
         print(f"       {r['reasoning']}")
         print()
