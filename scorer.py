@@ -30,6 +30,7 @@ Changes from v2 (production-evidence audit):
 
 import math
 import re
+from functools import lru_cache
 from datetime import date, datetime
 
 # ─────────────────────────────────────────────
@@ -312,6 +313,25 @@ CS_FIELDS = {
 
 def _norm(s: str) -> str:
     return s.strip().lower()
+
+
+_MATCH_NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _normalize_match_text(text: str) -> str:
+    return _MATCH_NORMALIZE_RE.sub(" ", str(text).lower()).strip()
+
+
+@lru_cache(maxsize=512)
+def _normalize_match_phrase(phrase: str) -> str:
+    return _normalize_match_text(phrase)
+
+
+def _phrase_present_norm(normalized_text: str, phrase: str) -> bool:
+    normalized_phrase = _normalize_match_phrase(phrase)
+    if not normalized_phrase:
+        return False
+    return f" {normalized_phrase} " in f" {normalized_text} "
 
 
 def _days_since(date_str: str) -> int:
@@ -781,20 +801,25 @@ SIGNALS = {
 # ============================================================
 
 def _phrase_present(text: str, phrase: str) -> bool:
-    """Match a complete normalized phrase (so search does not match research)."""
-    words = [re.escape(word) for word in _norm(phrase).split()]
-    if not words:
-        return False
-    pattern = r"(?<!\w)" + r"[\s\-/&]+".join(words) + r"(?!\w)"
-    return re.search(pattern, _norm(text)) is not None
+    """Match a complete normalized phrase without regex backtracking."""
+    return _phrase_present_norm(_normalize_match_text(text), phrase)
 
 
 def _signal_hits(text: str, signals: set[str]) -> int:
-    return sum(1 for signal in signals if _phrase_present(text, signal))
+    normalized_text = _normalize_match_text(text)
+    return sum(1 for signal in signals if _phrase_present_norm(normalized_text, signal))
+
+
+def _signal_hits_norm(normalized_text: str, signals: set[str]) -> int:
+    return sum(1 for signal in signals if _phrase_present_norm(normalized_text, signal))
 
 
 def _signal_score(text: str, signals: set[str], saturation: int) -> float:
     return min(1.0, _signal_hits(text, signals) / max(1, saturation))
+
+
+def _signal_score_norm(normalized_text: str, signals: set[str], saturation: int) -> float:
+    return min(1.0, _signal_hits_norm(normalized_text, signals) / max(1, saturation))
 
 
 # ============================================================
@@ -803,17 +828,17 @@ def _signal_score(text: str, signals: set[str], saturation: int) -> float:
 
 def _job_score(job):
 
-    text = (
+    text = _normalize_match_text(
         f"{job.get('title','')} "
         f"{job.get('description','')}"
-    ).lower()
+    )
 
-    retrieval = _signal_score(text, SIGNALS["retrieval"], 2)
-    recommendation = _signal_score(text, SIGNALS["recommendation"], 2)
-    llm = _signal_score(text, SIGNALS["llm"], 3)
-    operations = _signal_score(text, SIGNALS["operations"], 3)
-    ownership = _signal_score(text, SIGNALS["ownership"], 2)
-    impact = _signal_score(text, SIGNALS["impact"], 2)
+    retrieval = _signal_score_norm(text, SIGNALS["retrieval"], 2)
+    recommendation = _signal_score_norm(text, SIGNALS["recommendation"], 2)
+    llm = _signal_score_norm(text, SIGNALS["llm"], 3)
+    operations = _signal_score_norm(text, SIGNALS["operations"], 3)
+    ownership = _signal_score_norm(text, SIGNALS["ownership"], 2)
+    impact = _signal_score_norm(text, SIGNALS["impact"], 2)
 
     score = (
         0.35 * retrieval +
@@ -875,11 +900,11 @@ def _career_progression_bonus(career):
 def title_score(candidate):
     """Score based on current title only (isolated from company/career history)."""
     profile = candidate.get("profile", {})
-    current_title = _norm(profile.get("current_title", ""))
+    current_title = _normalize_match_text(profile.get("current_title", ""))
 
     # Hard disqualifier: non-tech current title
     for bad_title in NON_TECH_TITLES:
-        if bad_title in current_title:
+        if _phrase_present_norm(current_title, bad_title):
             if bad_title in WEAK_TITLE_OVERRIDE:
                 return 0.15
             return 0.0
@@ -1240,6 +1265,10 @@ def _capability_supported(text: str, phrases: set[str]) -> bool:
     return any(_phrase_present(text, phrase) for phrase in phrases)
 
 
+def _capability_supported_norm(normalized_text: str, phrases: set[str]) -> bool:
+    return any(_phrase_present_norm(normalized_text, phrase) for phrase in phrases)
+
+
 def skills_score(candidate: dict) -> float:
     """Score capabilities once, with independent career/assessment support."""
     skills = candidate.get("skills", [])
@@ -1257,11 +1286,11 @@ def skills_score(candidate: dict) -> float:
         ),
         reverse=True,
     )[:3]
-    recent_text = " ".join(
+    recent_text = _normalize_match_text(" ".join(
         f"{job.get('title', '')} {job.get('description', '')}"
         for job in recent_jobs
-    )
-    summary_text = (
+    ))
+    summary_text = _normalize_match_text(
         f"{profile.get('headline', '')} {profile.get('current_title', '')} "
         f"{profile.get('summary', '')}"
     )
@@ -1272,7 +1301,7 @@ def skills_score(candidate: dict) -> float:
     }
 
     supported = {
-        group: _capability_supported(recent_text, cfg["evidence"])
+        group: _capability_supported_norm(recent_text, cfg["evidence"])
         for group, cfg in CAPABILITY_GROUPS.items()
     }
     grouped = {group: [] for group in CAPABILITY_GROUPS}
@@ -1299,11 +1328,11 @@ def skills_score(candidate: dict) -> float:
             confidence = 0.95
         elif assessment >= 60:
             confidence = 0.80
-        elif _phrase_present(recent_text, name) or _phrase_present(recent_text, raw):
+        elif _phrase_present_norm(recent_text, name) or _phrase_present_norm(recent_text, raw):
             confidence = 1.0
         elif supported[group]:
             confidence = 0.85
-        elif _phrase_present(summary_text, name) or _phrase_present(summary_text, raw):
+        elif _phrase_present_norm(summary_text, name) or _phrase_present_norm(summary_text, raw):
             confidence = 0.70
         else:
             confidence = 0.50
@@ -1347,12 +1376,69 @@ def _has_offline_online_correlation(text: str) -> bool:
     offline + online + a correlation/prediction verb generalizes across all
     of these phrasings instead of hardcoding one template sentence.
     """
-    lowered = text.lower()
+    lowered = _normalize_match_text(text)
     has_both_sides = "offline" in lowered and "online" in lowered
     has_correlation_language = (
         "correlat" in lowered or "predict" in lowered
     )
     return has_both_sides and has_correlation_language
+
+
+PRODUCTION_EVIDENCE_GROUPS = {
+    "retrieval": {
+        "hybrid retrieval", "hybrid search", "dense retrieval",
+        "retrieval pipeline", "retrieval system", "vector search",
+        "semantic search", "embedding based", "embedding-based", "bm25",
+        "faiss", "qdrant", "weaviate", "milvus", "pgvector",
+        "elasticsearch", "opensearch", "retrieval augmented generation",
+        "rag",
+    },
+    "ranking": {
+        "learning to rank", "ltr", "ranking layer", "ranking model",
+        "ranking pipeline", "ranking system", "reranking", "re-ranking",
+        "reranker", "xgboost", "lightgbm", "gradient boosted",
+    },
+    "recommendation": {
+        "recommendation system", "recommender system",
+        "collaborative filtering", "matrix factorization", "personalization",
+        "discovery feed",
+    },
+    "evaluation": {
+        "ndcg", "mrr", "map", "recall k", "precision k",
+        "evaluation framework", "golden dataset", "relevance label",
+        "a b test", "ab test", "a b testing", "ab testing", "calibration",
+        "offline online correlation", "online offline correlation",
+        "optimization target", "click through", "click through rate",
+    },
+    "operations": {
+        "latency", "p95", "p99", "throughput", "qps", "drift",
+        "monitoring", "observability", "index refresh", "rollback",
+        "feature store", "autoscaling", "caching", "built and operated",
+        "production deployment",
+    },
+    "ownership": {
+        "owned", "led", "end to end", "from scratch", "designed",
+        "architected", "rolled out", "deployed", "shipped",
+    },
+}
+
+PRODUCTION_EVIDENCE_SCALE_PATTERNS = (
+    re.compile(
+        r"\b\d+(?:\.\d+)?\s*(?:m|million|b|billion)\+?\s*"
+        r"(?:users|queries|documents|profiles|items|records)\b",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b\d+(?:\.\d+)?\s*(?:k|thousand)\+?\s*"
+        r"(?:users|queries|documents|profiles|items|records)\b",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(r"\b\d+(?:\.\d+)?\s*qps\b", flags=re.IGNORECASE),
+    re.compile(
+        r"\b(?:improved|reduced|decreased|increased)\b.{0,80}\b\d+(?:\.\d+)?%",
+        flags=re.IGNORECASE,
+    ),
+)
 
 
 # def production_evidence_score(candidate: dict) -> float:
@@ -1415,55 +1501,6 @@ def production_evidence_score(candidate: dict) -> float:
         "ownership": 1.10,
         "scale": 1.15,
     }
-    patterns = {
-        "retrieval": [
-            r"\bhybrid (?:retrieval|search)\b", r"\bdense retrieval\b",
-            r"\bretrieval (?:pipeline|system)\b", r"\bvector search\b",
-            r"\bsemantic search\b", r"\bembedding[- ]based\b",
-            r"\bbm25\b", r"\b(?:faiss|qdrant|weaviate|milvus|pgvector)\b",
-            r"\b(?:elasticsearch|opensearch)\b",
-            r"\bretrieval[- ]augmented generation\b", r"\brag\b",
-        ],
-        "ranking": [
-            r"\blearning[- ]to[- ]rank\b", r"\bltr\b",
-            r"\branking (?:layer|model|pipeline|system)\b",
-            r"\bre[- ]?rank(?:ing|er)?\b", r"\bxgboost\b", r"\blightgbm\b",
-            r"\bgradient[- ]boosted\b",
-        ],
-        "recommendation": [
-            r"\brecommend(?:ation|er) system\b", r"\bcollaborative filtering\b",
-            r"\bmatrix factorization\b", r"\bpersonalization\b",
-            r"\bdiscovery feed\b",
-        ],
-        "evaluation": [
-            r"\b(?:ndcg|mrr|map)\b", r"\brecall@", r"\bprecision@",
-            r"\boffline.{0,80}online\b", r"\bonline.{0,80}offline\b",
-            r"\bevaluation framework\b", r"\bgolden dataset\b",
-            r"\brelevance label", r"\ba/?b test(?:ing)?\b",
-            r"\bcalibration\b",
-        ],
-        "operations": [
-            r"\blatency\b", r"\bp9[59]\b", r"\bthroughput\b", r"\bqps\b",
-            r"\bdrift\b", r"\bmonitoring\b", r"\bobservability\b",
-            r"\bindex refresh\b", r"\brollback\b", r"\bfeature store\b",
-            r"\bautoscaling\b", r"\bcaching\b", r"\bbuilt and operated\b",
-            r"\bproduction deployment\b",
-        ],
-        "ownership": [
-            r"\bowned\b", r"\bled\b", r"\bend[- ]to[- ]end\b",
-            r"\bfrom scratch\b", r"\bdesigned\b", r"\barchitected\b",
-            r"\brolled out\b", r"\bdeployed\b", r"\bshipped\b",
-        ],
-    }
-    scale_patterns = [
-        r"\b\d+(?:\.\d+)?\s*(?:m|million|b|billion)\+?\s*"
-        r"(?:users|queries|documents|profiles|items|records)\b",
-        r"\b\d+(?:\.\d+)?\s*(?:k|thousand)\+?\s*"
-        r"(?:users|queries|documents|profiles|items|records)\b",
-        r"\b\d+(?:\.\d+)?\s*qps\b",
-        r"\b(?:improved|reduced|decreased|increased)\b.{0,80}\b\d+(?:\.\d+)?%",
-    ]
-
     ordered_jobs = sorted(
         career,
         key=lambda job: (
@@ -1477,17 +1514,18 @@ def production_evidence_score(candidate: dict) -> float:
 
     for index, job in enumerate(ordered_jobs):
         recency = 1.0 if job.get("is_current") else (0.75 if index == 1 else 0.55 if index == 2 else 0.35)
-        description = " ".join(str(job.get("description", "")).lower().split())
+        description = _normalize_match_text(job.get("description", ""))
         if description and description in seen_descriptions:
             description = ""
         elif description:
             seen_descriptions.add(description)
-        text = f"{job.get('title', '')} {description}".lower()
+        text = _normalize_match_text(f"{job.get('title', '')} {description}")
 
         hit_counts = {
-            name: sum(bool(re.search(pattern, text)) for pattern in group_patterns)
-            for name, group_patterns in patterns.items()
+            name: _signal_hits_norm(text, group_patterns)
+            for name, group_patterns in PRODUCTION_EVIDENCE_GROUPS.items()
         }
+        evaluation_hits = hit_counts["evaluation"] + (1 if _has_offline_online_correlation(text) else 0)
         relevant_hits = (
             hit_counts["retrieval"]
             + hit_counts["ranking"]
@@ -1500,8 +1538,8 @@ def production_evidence_score(candidate: dict) -> float:
         if hit_counts["ranking"]:
             depth = min(1.0, 0.55 + 0.15 * (hit_counts["ranking"] - 1))
             dimensions["ranking"] = max(dimensions["ranking"], recency * depth)
-        if hit_counts["evaluation"] and relevant_hits:
-            depth = min(1.0, 0.55 + 0.15 * (hit_counts["evaluation"] - 1))
+        if evaluation_hits and relevant_hits:
+            depth = min(1.0, 0.55 + 0.15 * (evaluation_hits - 1))
             dimensions["evaluation"] = max(dimensions["evaluation"], recency * depth)
         if hit_counts["operations"] and relevant_hits:
             depth = min(1.0, 0.45 + 0.15 * (hit_counts["operations"] - 1))
@@ -1510,7 +1548,7 @@ def production_evidence_score(candidate: dict) -> float:
             depth = min(1.0, 0.45 + 0.15 * (hit_counts["ownership"] - 1))
             dimensions["ownership"] = max(dimensions["ownership"], recency * depth)
 
-        scale_hits = sum(bool(re.search(pattern, text)) for pattern in scale_patterns)
+        scale_hits = sum(bool(pattern.search(text)) for pattern in PRODUCTION_EVIDENCE_SCALE_PATTERNS)
         if scale_hits and relevant_hits:
             depth = min(1.0, 0.55 + 0.20 * (scale_hits - 1))
             dimensions["scale"] = max(dimensions["scale"], recency * depth)
@@ -1739,7 +1777,9 @@ def score_candidate(candidate: dict) -> dict:
     #     base += PRODUCTION_EVIDENCE_MAX_BONUS * production_evidence
 # ===========================================================
     
-    production_evidence = production_evidence_score(candidate)
+    production_evidence = 0.0
+    if tt >= PRODUCTION_EVIDENCE_TC_GATE and sk >= PRODUCTION_EVIDENCE_SK_GATE:
+        production_evidence = production_evidence_score(candidate)
 
     base += (
         PRODUCTION_EVIDENCE_MAX_BONUS *
