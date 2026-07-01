@@ -349,184 +349,984 @@ def _skill_trust(skill: dict) -> float:
 # Honeypot Detection
 # ─────────────────────────────────────────────
 
-def is_honeypot(candidate: dict) -> bool:
-    """
-    Returns True if the profile has impossible or fabricated signals.
-    Honeypots get score = 0.01 to stay out of top 100.
+# def is_honeypot(candidate: dict) -> bool:
+#     """
+#     Returns True if the profile has impossible or fabricated signals.
+#     Honeypots get score = 0.01 to stay out of top 100.
 
-    Three detection patterns (from dataset analysis):
-      1. Any skill with proficiency=expert AND duration_months=0
-      2. 3+ expert skills with 0 endorsements AND < 6 months duration
-      3. Career timeline months >> stated YoE (impossible overlap)
+#     Three detection patterns (from dataset analysis):
+#       1. Any skill with proficiency=expert AND duration_months=0
+#       2. 3+ expert skills with 0 endorsements AND < 6 months duration
+#       3. Career timeline months >> stated YoE (impossible overlap)
+#     """
+#     skills = candidate.get("skills", [])
+#     profile = candidate.get("profile", {})
+#     career = candidate.get("career_history", [])
+
+#     # Pattern 1: expert skill with zero usage — physically impossible
+#     for s in skills:
+#         if _norm(s.get("proficiency", "")) == "expert" and s.get("duration_months", 1) == 0:
+#             return True
+
+#     # Pattern 2: multiple unverified expert skills
+#     suspicious = [
+#         s for s in skills
+#         if _norm(s.get("proficiency", "")) == "expert"
+#         and s.get("endorsements", 0) == 0
+#         and s.get("duration_months", 0) < 6
+#     ]
+#     if len(suspicious) >= 3:
+#         return True
+
+#     # Pattern 3: career timeline longer than stated experience allows
+#     career_months = sum(j.get("duration_months", 0) for j in career)
+#     yoe_months = profile.get("years_of_experience", 0) * 12
+#     if career_months > yoe_months * 1.4 + 24:
+#         return True
+
+#     return False
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+def evaluate_integrity(candidate: dict) -> dict:
     """
-    skills = candidate.get("skills", [])
+    Evaluate profile integrity.
+
+    Returns:
+    {
+        "hard_fail": bool,
+        "reliability": float,
+        "reasons": list[str]
+    }
+    """
+
+    hard_fail = False
+    reliability = 1.0
+    reasons = []
+
     profile = candidate.get("profile", {})
     career = candidate.get("career_history", [])
+    education = candidate.get("education", [])
+    skills = candidate.get("skills", [])
 
-    # Pattern 1: expert skill with zero usage — physically impossible
+    yoe_months = max(0.0, float(profile.get("years_of_experience", 0) or 0) * 12)
+    # Use REFERENCE_DATE for deterministic scoring, not datetime.now()
+    reference_datetime = datetime.combine(REFERENCE_DATE, datetime.min.time())
+
+    ############################################################
+    # Employment timeline
+    ############################################################
+
+    intervals = []
+    current_jobs = 0
+
+    for job in career:
+
+        start = job.get("start_date")
+        end = job.get("end_date")
+
+        if job.get("is_current"):
+            current_jobs += 1
+
+        if not start:
+            continue
+
+        try:
+            s = datetime.strptime(start, "%Y-%m-%d")
+
+            if end:
+                e = datetime.strptime(end, "%Y-%m-%d")
+            else:
+                e = reference_datetime
+
+            if s > e:
+                hard_fail = True
+                reasons.append("reversed_employment_dates")
+                continue
+
+            intervals.append((s, e))
+
+        except (TypeError, ValueError):
+            reliability -= 0.03
+            reasons.append("invalid_employment_date")
+            continue
+
+    ############################################################
+    # Multiple current jobs
+    ############################################################
+
+    if current_jobs > 2:
+        hard_fail = True
+        reasons.append("multiple_current_jobs")
+    elif current_jobs == 2:
+        reliability -= 0.08
+        reasons.append("multiple_current_jobs")
+
+    ############################################################
+    # Concurrent jobs
+    ############################################################
+
+    events = []
+
+    for s, e in intervals:
+        events.append((s, 1))
+        events.append((e, -1))
+
+    events.sort()
+
+    active = 0
+
+    for _, delta in events:
+        active += delta
+
+        if active >= 3:
+            hard_fail = True
+            reasons.append("excessive_concurrent_jobs")
+            break
+
+    ############################################################
+    # Worked months
+    ############################################################
+
+    intervals.sort(key=lambda x: x[0])
+
+    merged = []
+
+    for interval in intervals:
+
+        if not merged:
+            merged.append(interval)
+            continue
+
+        ps, pe = merged[-1]
+        cs, ce = interval
+
+        if cs <= pe:
+            merged[-1] = (ps, max(pe, ce))
+        else:
+            merged.append(interval)
+
+    worked_days = sum((e - s).days for s, e in merged)
+    worked_months = worked_days / 30.44
+
+    diff = worked_months - yoe_months
+
+    # Stated YoE is rounded, so allow a small absolute/proportional margin.
+    # The released honeypot example (3 YoE but 61 worked months) must fail.
+    # Use proportional rule: worked_months > yoe_months * 1.25 + 6
+    allowed_months = yoe_months * 1.25 + 6
+    if yoe_months > 0 and worked_months > allowed_months:
+        hard_fail = True
+        reasons.append("career_months_exceed_yoe")
+    elif diff > 9 and not hard_fail:
+        reliability -= 0.08
+        reasons.append("career_months_high")
+
+    ############################################################
+    # Education chronology
+    ############################################################
+
+    def degree_level(name):
+
+        d = str(name).lower()
+
+        if any(x in d for x in ["ph.d", "phd", "doctor"]):
+            return 3
+
+        if any(x in d for x in [
+            "m.tech","m.e.","m.s.","m.sc","master","mba"
+        ]):
+            return 2
+
+        if any(x in d for x in [
+            "b.tech","b.e.","b.s.","b.sc","bachelor","b.a."
+        ]):
+            return 1
+
+        return 0
+
+    parsed = []
+
+    for edu in education:
+
+        try:
+            start = int(edu.get("start_year"))
+            end = int(edu.get("end_year"))
+        except:
+            continue
+
+        if end < start:
+            hard_fail = True
+            reasons.append("education_end_before_start")
+            continue
+
+        parsed.append({
+            "level": degree_level(edu.get("degree")),
+            "start": start,
+            "end": end
+        })
+
+    for higher in parsed:
+        if higher["level"] <= 1:
+            continue
+        for lower in parsed:
+            if lower["level"] <= 0 or higher["level"] <= lower["level"]:
+                continue
+
+            # A higher degree completed before the prerequisite degree began is
+            # impossible. Overlaps are suspicious but can represent dual or
+            # integrated programmes, so they are only a soft signal.
+            if higher["end"] < lower["start"]:
+                hard_fail = True
+                reasons.append(
+                    "masters_before_bachelors"
+                    if higher["level"] == 2
+                    else "phd_before_previous_degree"
+                )
+            elif higher["start"] < lower["end"] - 1:
+                reliability -= 0.08
+                reasons.append("overlapping_degrees")
+
+    ############################################################
+    # Skill integrity
+    ############################################################
+
+    zero_duration = 0
+    fake_experts = 0
+    absurd_duration = 0
+
     for s in skills:
-        if _norm(s.get("proficiency", "")) == "expert" and s.get("duration_months", 1) == 0:
-            return True
 
-    # Pattern 2: multiple unverified expert skills
-    suspicious = [
-        s for s in skills
-        if _norm(s.get("proficiency", "")) == "expert"
-        and s.get("endorsements", 0) == 0
-        and s.get("duration_months", 0) < 6
-    ]
-    if len(suspicious) >= 3:
-        return True
+        prof = _norm(s.get("proficiency", ""))
 
-    # Pattern 3: career timeline longer than stated experience allows
-    career_months = sum(j.get("duration_months", 0) for j in career)
-    yoe_months = profile.get("years_of_experience", 0) * 12
-    if career_months > yoe_months * 1.4 + 24:
-        return True
+        dur = s.get("duration_months", 0)
 
-    return False
+        endors = s.get("endorsements", 0)
 
+        if prof == "expert":
+
+            if dur == 0:
+                zero_duration += 1
+
+            if dur < 6 and endors == 0:
+                fake_experts += 1
+
+        if yoe_months > 0 and dur > yoe_months + 36:
+            absurd_duration += 1
+
+    if zero_duration >= 2:
+        hard_fail = True
+        reasons.append("multiple_zero_duration_experts")
+
+    elif zero_duration == 1:
+        reliability -= 0.05
+
+    if fake_experts >= 3:
+        hard_fail = True
+        reasons.append("multiple_unverified_experts")
+
+    if absurd_duration >= 4:
+        hard_fail = True
+        reasons.append("impossible_skill_durations")
+
+    elif absurd_duration > 0:
+        reliability -= 0.10
+
+    ############################################################
+    # Current company consistency
+    ############################################################
+
+    current_company = str(
+        profile.get("current_company", "")
+    ).lower()
+
+    if current_company:
+
+        found = False
+
+        for job in career:
+
+            if job.get("is_current"):
+
+                company = str(job.get("company", "")).lower()
+
+                if current_company in company or company in current_company:
+                    found = True
+                    break
+
+        if not found and current_jobs > 0:
+            reliability -= 0.10
+            reasons.append("current_company_mismatch")
+
+    ############################################################
+    # Finalize
+    ############################################################
+
+    reliability = max(0.25 if hard_fail else 0.0, min(1.0, reliability))
+
+    return {
+        "hard_fail": hard_fail,
+        "reliability": round(reliability, 2),
+        "reasons": sorted(set(reasons))
+    }
+
+
+def is_honeypot(candidate: dict) -> bool:
+    """Backward-compatible public API used by tests, diagnostics and the app."""
+    return evaluate_integrity(candidate)["hard_fail"]
 
 # ─────────────────────────────────────────────
 # Component Scorers
 # ─────────────────────────────────────────────
+#   NEW  [title_career_score()  TILL 660
 
-def title_career_score(candidate: dict) -> float:
-    """
-    Score based on current title + full career history.
-    Rewards: ML/AI/Search/Ranking engineers at product companies.
-    Penalizes: non-tech titles, pure consulting careers.
-    """
+# ============================================================
+# SIGNAL GROUPS
+# ============================================================
+
+SIGNALS = {
+
+    "retrieval": {
+        "retrieval", "search", "ranking",
+        "learning to rank", "ltr",
+        "hybrid retrieval", "dense retrieval",
+        "semantic search", "vector search",
+        "bm25", "faiss",
+        "elasticsearch", "opensearch",
+        "qdrant", "milvus", "weaviate",
+        "pinecone", "pgvector",
+        "ndcg", "mrr", "recall@k",
+        "rerank", "reranking",
+        "search relevance"
+    },
+
+    "recommendation": {
+        "recommendation",
+        "recommendation systems",
+        "recommendation system",
+        "collaborative filtering",
+        "matrix factorization",
+        "personalization",
+        "discovery feed",
+        "candidate matching"
+    },
+
+    "llm": {
+        "llm", "rag",
+        "gpt", "llama", "mistral",
+        "bert",
+        "transformer",
+        "transformers",
+        "sentence transformer",
+        "sentence-transformer",
+        "langchain",
+        "llamaindex",
+        "haystack",
+        "fine tuning",
+        "fine-tuning",
+        "lora",
+        "qlora",
+        "peft"
+    },
+
+    "operations": {
+        "production",
+        "latency",
+        "p95",
+        "throughput",
+        "qps",
+        "deployment",
+        "monitoring",
+        "drift",
+        "mlflow",
+        "kubeflow",
+        "feature store",
+        "offline",
+        "online",
+        "ab test",
+        "a/b"
+    },
+
+    "ownership": {
+        "led",
+        "owned",
+        "designed",
+        "architected",
+        "implemented",
+        "built",
+        "built from scratch",
+        "migrated",
+        "rolled out",
+        "launched",
+        "shipped",
+        "mentored"
+    },
+
+    "impact": {
+        "%",
+        "improved",
+        "reduced",
+        "decreased",
+        "increased",
+        "million",
+        "10m",
+        "30m",
+        "35m",
+        "50m",
+        "100m"
+    }
+}
+
+# ============================================================
+# HIT RATIO
+# ============================================================
+
+def _phrase_present(text: str, phrase: str) -> bool:
+    """Match a complete normalized phrase (so search does not match research)."""
+    words = [re.escape(word) for word in _norm(phrase).split()]
+    if not words:
+        return False
+    pattern = r"(?<!\w)" + r"[\s\-/&]+".join(words) + r"(?!\w)"
+    return re.search(pattern, _norm(text)) is not None
+
+
+def _signal_hits(text: str, signals: set[str]) -> int:
+    return sum(1 for signal in signals if _phrase_present(text, signal))
+
+
+def _signal_score(text: str, signals: set[str], saturation: int) -> float:
+    return min(1.0, _signal_hits(text, signals) / max(1, saturation))
+
+
+# ============================================================
+# SCORE ONE JOB
+# ============================================================
+
+def _job_score(job):
+
+    text = (
+        f"{job.get('title','')} "
+        f"{job.get('description','')}"
+    ).lower()
+
+    retrieval = _signal_score(text, SIGNALS["retrieval"], 2)
+    recommendation = _signal_score(text, SIGNALS["recommendation"], 2)
+    llm = _signal_score(text, SIGNALS["llm"], 3)
+    operations = _signal_score(text, SIGNALS["operations"], 3)
+    ownership = _signal_score(text, SIGNALS["ownership"], 2)
+    impact = _signal_score(text, SIGNALS["impact"], 2)
+
+    score = (
+        0.35 * retrieval +
+        0.15 * recommendation +
+        0.15 * llm +
+        0.15 * ownership +
+        0.10 * operations +
+        0.10 * impact
+    )
+
+    return min(score, 1.0)
+
+
+# ============================================================
+# TITLE PROGRESSION
+# ============================================================
+
+LEVELS = [
+    "engineer",
+    "senior",
+    "lead",
+    "staff",
+    "principal",
+    "architect",
+    "director"
+]
+
+
+def _career_progression_bonus(career):
+
+    if len(career) < 2:
+        return 0.0
+
+    previous = None
+    improvements = 0
+
+    for job in reversed(career):
+
+        title = job.get("title", "").lower()
+
+        level = 0
+
+        for i, keyword in enumerate(LEVELS):
+            if keyword in title:
+                level = i
+
+        if previous is not None and level > previous:
+            improvements += 1
+
+        previous = level
+
+    return min(improvements * 0.015, 0.06)
+
+
+# ============================================================
+# TITLE SCORE — Current title relevance only
+# ============================================================
+
+def title_score(candidate):
+    """Score based on current title only (isolated from company/career history)."""
     profile = candidate.get("profile", {})
-    career = candidate.get("career_history", [])
-
     current_title = _norm(profile.get("current_title", ""))
-    current_industry = _norm(profile.get("current_industry", ""))
 
     # Hard disqualifier: non-tech current title
-    # (excluding weak-title-override roles that get low-but-nonzero score)
     for bad_title in NON_TECH_TITLES:
         if bad_title in current_title:
-            # Project Manager / Business Analyst — not hard zero, just weak
             if bad_title in WEAK_TITLE_OVERRIDE:
-                base = 0.15
-                break
+                return 0.15
             return 0.0
+
+    strong_title_terms = {
+        "recommendation", "ranking", "retrieval", "search", "nlp",
+        "ml engineer", "machine learning", "applied ml", "applied ai",
+        "ai engineer", "information retrieval", "vector", "embedding",
+    }
+    moderate_title_terms = {
+        "data scientist", "data science", "research engineer", "llm",
+        "generative", "foundation model",
+    }
+    generic_title_terms = {
+        "software engineer", "sde", "backend", "platform engineer",
+        "senior engineer",
+    }
+
+    if any(term in current_title for term in strong_title_terms):
+        return 0.90
+    elif any(term in current_title for term in moderate_title_terms):
+        return 0.70
+    elif any(term in current_title for term in generic_title_terms):
+        return 0.50
     else:
-        # Determine base score from title keywords
-        strong_ml_keywords = {
-            "recommendation", "ranking", "retrieval", "search",
-            "nlp", "ml engineer", "machine learning", "applied ml",
-            "applied ai", "ai engineer", "information retrieval",
-            "vector", "embedding",
-        }
-        moderate_ml_keywords = {
-            "data scientist", "data science", "research engineer",
-            "llm", "generative", "foundation model",
-        }
-        generic_swe_keywords = {
-            "software engineer", "sde", "backend", "fullstack",
-            "full-stack", "platform engineer", "senior engineer",
-        }
-        data_eng_keywords = {
-            "data engineer", "analytics engineer", "etl",
-        }
+        return 0.30
 
-        if any(k in current_title for k in strong_ml_keywords):
-            base = 0.85
-        elif any(k in current_title for k in moderate_ml_keywords):
-            base = 0.70
-        elif any(k in current_title for k in generic_swe_keywords):
-            base = 0.50
-        elif any(k in current_title for k in data_eng_keywords):
-            base = 0.40
-        else:
-            base = 0.25   # Other tech titles (DevOps, QA, Mobile, etc.)
 
-    # ── Company quality modifier ──────────────────────────────────────────────
-    all_companies = [_norm(j.get("company", "")) for j in career]
+# ============================================================
+# CAREER EVIDENCE SCORE — Job descriptions and domain relevance
+# ============================================================
+
+def career_evidence_score(candidate):
+    """Score based on job descriptions and career history relevance."""
+    career = candidate.get("career_history", [])
+
+    if not career:
+        return 0.0
+
+    total = 0.0
+    total_weight = 0.0
+    seen_descriptions = set()
+
+    for idx, job in enumerate(career):
+        description = " ".join(str(job.get("description", "")).lower().split())
+        job_for_scoring = job
+        weight_multiplier = 1.0
+
+        if description and description in seen_descriptions:
+            # Duplicate description: reduce weight to avoid double-counting keywords,
+            # but keep the description for title-based relevance
+            weight_multiplier = 0.4
+        elif description:
+            seen_descriptions.add(description)
+
+        relevance = _job_score(job_for_scoring)
+
+        duration = max(job.get("duration_months", 12), 1)
+        duration_weight = math.log1p(duration)
+
+        recency = 1.0 if job.get("is_current") else max(0.35, 0.85 ** idx)
+        weight = duration_weight * recency * weight_multiplier
+
+        total += relevance * weight
+        total_weight += weight
+
+    if total_weight == 0:
+        return 0.0
+
+    score = total / total_weight
+    score += _career_progression_bonus(career)
+    return max(0.0, min(score, 1.0))
+
+
+# ============================================================
+# COMPANY FIT SCORE — Company quality with limited bonuses
+# ============================================================
+
+def company_fit_score(candidate):
+    """
+    Company quality score with reduced bonuses.
+    - Consulting penalty: hard stop at 0.45 (per JD)
+    - Product company bonus: capped at +0.10 (not +0.25)
+    - Unknown companies: neutral 0.80
+    """
+    career = candidate.get("career_history", [])
+
+    if not career:
+        return 0.80
+
+    companies = [str(job.get("company", "")).lower() for job in career]
     consulting_count = sum(
-        1 for co in all_companies
-        if any(bc in co for bc in BIG_CONSULTING)
+        any(x in c for x in BIG_CONSULTING) for c in companies
     )
     product_count = sum(
-        1 for co in all_companies
-        if any(pc in co for pc in STRONG_PRODUCT_COS)
+        any(x in c for x in STRONG_PRODUCT_COS) for c in companies
     )
 
-    total_jobs = len(all_companies)
-    if total_jobs == 0:
-        company_modifier = 0.8
-    elif consulting_count == total_jobs:
-        # Entire career at consulting — JD explicitly disqualifies this
-        company_modifier = 0.4
-    elif consulting_count > 0 and product_count == 0:
-        # Mix of consulting + generic companies, no strong product cos
-        company_modifier = 0.7
-    elif product_count > 0:
-        # At least some product company experience
-        product_ratio = product_count / total_jobs
-        company_modifier = 0.9 + 0.1 * product_ratio
-    else:
-        company_modifier = 0.85   # Unknown companies — neutral assumption
+    n = len(companies)
 
-    # Industry signal (minor)
-    # if any(k in current_industry for k in ("software", "ai", "ml", "saas", "technology")):
-    #     industry_modifier = 1.05
-    # elif "it services" in current_industry:
-    #     industry_modifier = 0.9
-    # else:
-    #     industry_modifier = 1.0
+    # Pure consulting career — JD explicit disqualifier
+    if consulting_count == n:
+        return 0.45
 
-    score = base * company_modifier #* industry_modifier
-    return min(1.0, max(0.0, score))
+    # Mix of consulting + other, no product experience
+    if consulting_count > 0 and product_count == 0:
+        return 0.75
+
+    # Has product company experience — limited bonus
+    if product_count > 0:
+        ratio = product_count / n
+        return min(0.90, 0.80 + 0.10 * ratio)
+
+    # Unknown companies
+    return 0.80
+
+# # def title_career_score(candidate: dict) -> float:
+#     """
+#     Score based on current title + full career history.
+#     Rewards: ML/AI/Search/Ranking engineers at product companies.
+#     Penalizes: non-tech titles, pure consulting careers.
+#     """
+#     profile = candidate.get("profile", {})
+#     career = candidate.get("career_history", [])
+
+#     current_title = _norm(profile.get("current_title", ""))
+#     current_industry = _norm(profile.get("current_industry", ""))
+
+#     # Hard disqualifier: non-tech current title
+#     # (excluding weak-title-override roles that get low-but-nonzero score)
+#     for bad_title in NON_TECH_TITLES:
+#         if bad_title in current_title:
+#             # Project Manager / Business Analyst — not hard zero, just weak
+#             if bad_title in WEAK_TITLE_OVERRIDE:
+#                 base = 0.15
+#                 break
+#             return 0.0
+#     else:
+#         # Determine base score from title keywords
+#         strong_ml_keywords = {
+#             "recommendation", "ranking", "retrieval", "search",
+#             "nlp", "ml engineer", "machine learning", "applied ml",
+#             "applied ai", "ai engineer", "information retrieval",
+#             "vector", "embedding",
+#         }
+#         moderate_ml_keywords = {
+#             "data scientist", "data science", "research engineer",
+#             "llm", "generative", "foundation model",
+#         }
+#         generic_swe_keywords = {
+#             "software engineer", "sde", "backend", "fullstack",
+#             "full-stack", "platform engineer", "senior engineer",
+#         }
+#         data_eng_keywords = {
+#             "data engineer", "analytics engineer", "etl",
+#         }
+
+#         if any(k in current_title for k in strong_ml_keywords):
+#             base = 0.85
+#         elif any(k in current_title for k in moderate_ml_keywords):
+#             base = 0.70
+#         elif any(k in current_title for k in generic_swe_keywords):
+#             base = 0.50
+#         elif any(k in current_title for k in data_eng_keywords):
+#             base = 0.40
+#         else:
+#             base = 0.25   # Other tech titles (DevOps, QA, Mobile, etc.)
+
+#     # ── Company quality modifier ──────────────────────────────────────────────
+#     all_companies = [_norm(j.get("company", "")) for j in career]
+#     consulting_count = sum(
+#         1 for co in all_companies
+#         if any(bc in co for bc in BIG_CONSULTING)
+#     )
+#     product_count = sum(
+#         1 for co in all_companies
+#         if any(pc in co for pc in STRONG_PRODUCT_COS)
+#     )
+
+#     total_jobs = len(all_companies)
+#     if total_jobs == 0:
+#         company_modifier = 0.8
+#     elif consulting_count == total_jobs:
+#         # Entire career at consulting — JD explicitly disqualifies this
+#         company_modifier = 0.4
+#     elif consulting_count > 0 and product_count == 0:
+#         # Mix of consulting + generic companies, no strong product cos
+#         company_modifier = 0.7
+#     elif product_count > 0:
+#         # At least some product company experience
+#         product_ratio = product_count / total_jobs
+#         company_modifier = 0.9 + 0.1 * product_ratio
+#     else:
+#         company_modifier = 0.85   # Unknown companies — neutral assumption
+
+#     # Industry signal (minor)
+#     # if any(k in current_industry for k in ("software", "ai", "ml", "saas", "technology")):
+#     #     industry_modifier = 1.05
+#     # elif "it services" in current_industry:
+#     #     industry_modifier = 0.9
+#     # else:
+#     #     industry_modifier = 1.0
+
+#     score = base * company_modifier #* industry_modifier
+#     return min(1.0, max(0.0, score))
+# # 
+
+# def skills_score(candidate: dict) -> float:
+#     """
+#     Score based on skill match with JD requirements.
+#     Uses trust-weighted scoring (proficiency × endorsements × duration).
+#     Keyword stuffers (expert with 0 usage) contribute 0.0.
+#     """
+#     skills = candidate.get("skills", [])
+#     if not skills:
+#         return 0.0
+
+#     core_coverage = 0.0
+#     niche_bonus = 0.0
+#     core_matched = set()
+#     niche_matched = set()
+
+#     for skill_entry in skills:
+#         raw_name = _norm(skill_entry.get("name", ""))
+#         name = SKILL_NORMALIZE.get(raw_name, raw_name)
+#         trust = _skill_trust(skill_entry)
+
+#         if name in CORE_SKILLS or raw_name in CORE_SKILLS:
+#             if name not in core_matched:
+#                 core_coverage += trust
+#                 core_matched.add(name)
+#         elif name in NICHE_SKILLS or raw_name in NICHE_SKILLS:
+#             if name not in niche_matched:
+#                 niche_bonus += trust * 0.5
+#                 niche_matched.add(name)
+
+#     # ~5 genuine core skills at full trust → core_score = 1.0
+#     core_score = min(1.0, core_coverage / 5.0)
+#     # ~4 niche skills at full trust → niche_score = 0.5 max
+#     niche_score = min(0.5, niche_bonus / 4.0)
+
+#     # Platform assessment bonus (verified scores from Redrob)
+#     assessment_bonus = 0.0
+#     assessments = candidate.get("redrob_signals", {}).get("skill_assessment_scores", {})
+#     for skill_name, score_val in assessments.items():
+#         norm_name = _norm(skill_name)
+#         if norm_name in CORE_SKILLS or norm_name in NICHE_SKILLS:
+#             assessment_bonus += (score_val / 100.0) * 0.05
+#     assessment_bonus = min(0.1, assessment_bonus)
+
+#     return min(1.0, core_score * 0.7 + niche_score * 0.3 + assessment_bonus)
+
+
+
+# Canonical capability taxonomy shared by structured-skill and career support
+# matching. Vendor breadth is deliberately capped within a capability.
+CAPABILITY_GROUPS = {
+    "python": {
+        "cap": 0.18,
+        "skills": {"python"},
+        "evidence": {"python"},
+    },
+    "retrieval": {
+        "cap": 0.24,
+        "skills": {
+            "retrieval", "information retrieval", "information retrieval systems",
+            "search", "search infrastructure", "search backend",
+            "search and discovery", "search & discovery", "ranking",
+            "ranking systems", "learning to rank", "ltr", "semantic search",
+            "vector search", "embeddings", "embedding", "bm25",
+            "content matching", "candidate matching", "matching systems",
+            "vector representations", "text encoders", "indexing algorithms",
+            "indexing", "dense retrieval", "hybrid search", "hybrid retrieval",
+            "dense passage retrieval", "dpr", "sentence transformers",
+            "sentence-transformers", "sentence transformer",
+        },
+        "evidence": {
+            "retrieval", "information retrieval", "search infrastructure",
+            "search backend", "search and discovery", "ranking layer",
+            "ranking model", "ranking models", "ranking pipeline", "ranking system",
+            "learning to rank", "semantic search", "vector search", "embedding based",
+            "embedding-based", "hybrid retrieval", "hybrid search", "dense retrieval",
+            "bm25", "reranking", "re-ranking", "retrieval pipeline", "retrieval system",
+            "retrieval-augmented generation", "rag",
+        },
+    },
+    "vector_infra": {
+        "cap": 0.15,
+        "skills": {
+            "faiss", "pinecone", "qdrant", "milvus", "weaviate", "pgvector",
+            "elasticsearch", "opensearch", "vector database", "vector db",
+            "vector store", "annoy", "chromadb",
+        },
+        "evidence": {
+            "faiss", "pinecone", "qdrant", "milvus", "weaviate", "pgvector",
+            "elasticsearch", "opensearch", "vector database", "vector store",
+            "vector database", "index refresh", "vector index",
+        },
+    },
+    "recommendation": {
+        "cap": 0.12,
+        "skills": {
+            "recommendation systems", "recommendation system",
+            "recommender systems", "recommender system", "recommendation engine",
+            "collaborative filtering", "matrix factorization",
+        },
+        "evidence": {
+            "recommendation system", "recommender system", "recommendation engine",
+            "collaborative filtering", "matrix factorization",
+            "personalization", "discovery feed", "behavioral signal",
+        },
+    },
+    "evaluation": {
+        "cap": 0.14,
+        "skills": {
+            "a/b testing", "ab testing", "evaluation", "ndcg", "mrr", "map",
+            "offline evaluation", "ranking evaluation", "retrieval evaluation",
+            "experimentation", "experimentation framework",
+        },
+        "evidence": {
+            "a/b testing", "ab testing", "a/b testing", "offline evaluation",
+            "online evaluation", "evaluation framework", "ndcg", "mrr", "map",
+            "recall@", "precision@", "relevance labels", "relevance label",
+            "golden dataset", "calibration",
+            "offline online correlation", "online offline correlation",
+            "optimization target", "a/b test", "ab test",
+        },
+    },
+    "operations": {
+        "cap": 0.10,
+        "skills": {
+            "mlops", "mlflow", "kubeflow", "bentoml", "docker", "kubernetes",
+            "model monitoring", "data drift", "drift detection", "monitoring",
+        },
+        "evidence": {
+            "latency", "throughput", "qps", "p95", "p99", "monitoring", "drift",
+            "index refresh", "feature store", "rollback", "autoscaling",
+            "production deployment", "built and operated", "deployment",
+            "production", "observability",
+        },
+    },
+    "llm": {
+        "cap": 0.07,
+        "skills": {
+            "rag", "haystack", "llm", "prompt engineering", "lora", "qlora",
+            "peft", "fine-tuning", "fine tuning", "transformers",
+            "hugging face transformers", "hugging face", "langchain", "llamaindex",
+        },
+        "evidence": {
+            "retrieval augmented generation", "rag", "fine tuned", "fine tuning",
+            "lora", "qlora", "peft", "llm", "transformers",
+        },
+    },
+}
+
+
+def _capability_supported(text: str, phrases: set[str]) -> bool:
+    return any(_phrase_present(text, phrase) for phrase in phrases)
 
 
 def skills_score(candidate: dict) -> float:
-    """
-    Score based on skill match with JD requirements.
-    Uses trust-weighted scoring (proficiency × endorsements × duration).
-    Keyword stuffers (expert with 0 usage) contribute 0.0.
-    """
+    """Score capabilities once, with independent career/assessment support."""
     skills = candidate.get("skills", [])
     if not skills:
         return 0.0
 
-    core_coverage = 0.0
-    niche_bonus = 0.0
-    core_matched = set()
-    niche_matched = set()
+    career = candidate.get("career_history", [])
+    profile = candidate.get("profile", {})
+    recent_jobs = sorted(
+        career,
+        key=lambda job: (
+            bool(job.get("is_current")),
+            job.get("end_date") or "",
+            job.get("start_date") or "",
+        ),
+        reverse=True,
+    )[:3]
+    recent_text = " ".join(
+        f"{job.get('title', '')} {job.get('description', '')}"
+        for job in recent_jobs
+    )
+    summary_text = (
+        f"{profile.get('headline', '')} {profile.get('current_title', '')} "
+        f"{profile.get('summary', '')}"
+    )
+    assessments = {
+        SKILL_NORMALIZE.get(_norm(name), _norm(name)): float(score)
+        for name, score in candidate.get("redrob_signals", {})
+        .get("skill_assessment_scores", {}).items()
+    }
 
-    for skill_entry in skills:
-        raw_name = _norm(skill_entry.get("name", ""))
-        name = SKILL_NORMALIZE.get(raw_name, raw_name)
-        trust = _skill_trust(skill_entry)
+    supported = {
+        group: _capability_supported(recent_text, cfg["evidence"])
+        for group, cfg in CAPABILITY_GROUPS.items()
+    }
+    grouped = {group: [] for group in CAPABILITY_GROUPS}
 
-        if name in CORE_SKILLS or raw_name in CORE_SKILLS:
-            if name not in core_matched:
-                core_coverage += trust
-                core_matched.add(name)
-        elif name in NICHE_SKILLS or raw_name in NICHE_SKILLS:
-            if name not in niche_matched:
-                niche_bonus += trust * 0.5
-                niche_matched.add(name)
+    for skill in skills:
+        raw = _norm(skill.get("name", ""))
+        name = SKILL_NORMALIZE.get(raw, raw)
+        group = next(
+            (
+                group_name
+                for group_name, cfg in CAPABILITY_GROUPS.items()
+                if name in cfg["skills"] or raw in cfg["skills"]
+            ),
+            None,
+        )
+        if group is None:
+            continue
 
-    # ~5 genuine core skills at full trust → core_score = 1.0
-    core_score = min(1.0, core_coverage / 5.0)
-    # ~4 niche skills at full trust → niche_score = 0.5 max
-    niche_score = min(0.5, niche_bonus / 4.0)
+        assessment = max(
+            assessments.get(name, -1),
+            assessments.get(raw, -1),
+        )
+        if assessment >= 80:
+            confidence = 0.95
+        elif assessment >= 60:
+            confidence = 0.80
+        elif _phrase_present(recent_text, name) or _phrase_present(recent_text, raw):
+            confidence = 1.0
+        elif supported[group]:
+            confidence = 0.85
+        elif _phrase_present(summary_text, name) or _phrase_present(summary_text, raw):
+            confidence = 0.70
+        else:
+            confidence = 0.50
 
-    # Platform assessment bonus (verified scores from Redrob)
-    assessment_bonus = 0.0
-    assessments = candidate.get("redrob_signals", {}).get("skill_assessment_scores", {})
-    for skill_name, score_val in assessments.items():
-        norm_name = _norm(skill_name)
-        if norm_name in CORE_SKILLS or norm_name in NICHE_SKILLS:
-            assessment_bonus += (score_val / 100.0) * 0.05
-    assessment_bonus = min(0.1, assessment_bonus)
+        grouped[group].append(_skill_trust(skill) * confidence)
 
-    return min(1.0, core_score * 0.7 + niche_score * 0.3 + assessment_bonus)
+    total = 0.0
+    for group, values in grouped.items():
+        if not values:
+            continue
+        values.sort(reverse=True)
+        strength = values[0] + sum(min(0.04, value * 0.10) for value in values[1:])
+        total += CAPABILITY_GROUPS[group]["cap"] * min(1.0, strength)
 
+    assessment_bonus = min(
+        0.03,
+        sum(
+            (score / 100.0) * 0.01
+            for skill, score in assessments.items()
+            if any(skill in cfg["skills"] for cfg in CAPABILITY_GROUPS.values())
+        ),
+    )
+    return min(1.0, total + assessment_bonus)
 
 def _contains_evidence_term(text: str, term: str) -> bool:
     """Match a complete term, avoiding false positives such as search/research."""
@@ -555,37 +1355,168 @@ def _has_offline_online_correlation(text: str) -> bool:
     return has_both_sides and has_correlation_language
 
 
+# def production_evidence_score(candidate: dict) -> float:
+#     """
+#     Return a 0–1 score for concrete production evidence in career history.
+
+#     Each evidence category counts once, using the highest recency weight of a
+#     matching job: current=1.0, second job=0.7, older jobs=0.4. Both job title
+#     and description are considered.
+#     """
+#     career = candidate.get("career_history", [])
+#     category_weights = {category: 0.0 for category in EVIDENCE_CATEGORIES}
+
+#     for index, job in enumerate(career):
+#         if job.get("is_current", False):
+#             recency_weight = 1.0
+#         elif index == 1:
+#             recency_weight = 0.7
+#         else:
+#             recency_weight = 0.4
+
+#         text = f"{job.get('title', '')} {job.get('description', '')}"
+#         for category, terms in EVIDENCE_CATEGORIES.items():
+#             matched = any(_contains_evidence_term(text, term) for term in terms)
+#             if category == "evaluation" and not matched:
+#                 matched = _has_offline_online_correlation(text)
+#             if matched:
+#                 category_weights[category] = max(
+#                     category_weights[category], recency_weight
+#                 )
+
+#     return sum(category_weights.values()) / len(EVIDENCE_CATEGORIES)
+
+
+
 def production_evidence_score(candidate: dict) -> float:
     """
-    Return a 0–1 score for concrete production evidence in career history.
+    Contextual, depth-aware production evidence.
 
-    Each evidence category counts once, using the highest recency weight of a
-    matching job: current=1.0, second job=0.7, older jobs=0.4. Both job title
-    and description are considered.
+    Repeated descriptions count once. Operations, ownership and scale only
+    count when the same job contains retrieval/ranking/recommendation evidence.
     """
     career = candidate.get("career_history", [])
-    category_weights = {category: 0.0 for category in EVIDENCE_CATEGORIES}
+    if not career:
+        return 0.0
 
-    for index, job in enumerate(career):
-        if job.get("is_current", False):
-            recency_weight = 1.0
-        elif index == 1:
-            recency_weight = 0.7
-        else:
-            recency_weight = 0.4
+    dimensions = {
+        "retrieval": 0.0,
+        "ranking": 0.0,
+        "evaluation": 0.0,
+        "operations": 0.0,
+        "ownership": 0.0,
+        "scale": 0.0,
+    }
+    weights = {
+        "retrieval": 1.35,
+        "ranking": 1.25,
+        "evaluation": 1.20,
+        "operations": 0.95,
+        "ownership": 1.10,
+        "scale": 1.15,
+    }
+    patterns = {
+        "retrieval": [
+            r"\bhybrid (?:retrieval|search)\b", r"\bdense retrieval\b",
+            r"\bretrieval (?:pipeline|system)\b", r"\bvector search\b",
+            r"\bsemantic search\b", r"\bembedding[- ]based\b",
+            r"\bbm25\b", r"\b(?:faiss|qdrant|weaviate|milvus|pgvector)\b",
+            r"\b(?:elasticsearch|opensearch)\b",
+            r"\bretrieval[- ]augmented generation\b", r"\brag\b",
+        ],
+        "ranking": [
+            r"\blearning[- ]to[- ]rank\b", r"\bltr\b",
+            r"\branking (?:layer|model|pipeline|system)\b",
+            r"\bre[- ]?rank(?:ing|er)?\b", r"\bxgboost\b", r"\blightgbm\b",
+            r"\bgradient[- ]boosted\b",
+        ],
+        "recommendation": [
+            r"\brecommend(?:ation|er) system\b", r"\bcollaborative filtering\b",
+            r"\bmatrix factorization\b", r"\bpersonalization\b",
+            r"\bdiscovery feed\b",
+        ],
+        "evaluation": [
+            r"\b(?:ndcg|mrr|map)\b", r"\brecall@", r"\bprecision@",
+            r"\boffline.{0,80}online\b", r"\bonline.{0,80}offline\b",
+            r"\bevaluation framework\b", r"\bgolden dataset\b",
+            r"\brelevance label", r"\ba/?b test(?:ing)?\b",
+            r"\bcalibration\b",
+        ],
+        "operations": [
+            r"\blatency\b", r"\bp9[59]\b", r"\bthroughput\b", r"\bqps\b",
+            r"\bdrift\b", r"\bmonitoring\b", r"\bobservability\b",
+            r"\bindex refresh\b", r"\brollback\b", r"\bfeature store\b",
+            r"\bautoscaling\b", r"\bcaching\b", r"\bbuilt and operated\b",
+            r"\bproduction deployment\b",
+        ],
+        "ownership": [
+            r"\bowned\b", r"\bled\b", r"\bend[- ]to[- ]end\b",
+            r"\bfrom scratch\b", r"\bdesigned\b", r"\barchitected\b",
+            r"\brolled out\b", r"\bdeployed\b", r"\bshipped\b",
+        ],
+    }
+    scale_patterns = [
+        r"\b\d+(?:\.\d+)?\s*(?:m|million|b|billion)\+?\s*"
+        r"(?:users|queries|documents|profiles|items|records)\b",
+        r"\b\d+(?:\.\d+)?\s*(?:k|thousand)\+?\s*"
+        r"(?:users|queries|documents|profiles|items|records)\b",
+        r"\b\d+(?:\.\d+)?\s*qps\b",
+        r"\b(?:improved|reduced|decreased|increased)\b.{0,80}\b\d+(?:\.\d+)?%",
+    ]
 
-        text = f"{job.get('title', '')} {job.get('description', '')}"
-        for category, terms in EVIDENCE_CATEGORIES.items():
-            matched = any(_contains_evidence_term(text, term) for term in terms)
-            if category == "evaluation" and not matched:
-                matched = _has_offline_online_correlation(text)
-            if matched:
-                category_weights[category] = max(
-                    category_weights[category], recency_weight
-                )
+    ordered_jobs = sorted(
+        career,
+        key=lambda job: (
+            bool(job.get("is_current")),
+            job.get("end_date") or "",
+            job.get("start_date") or "",
+        ),
+        reverse=True,
+    )
+    seen_descriptions = set()
 
-    return sum(category_weights.values()) / len(EVIDENCE_CATEGORIES)
+    for index, job in enumerate(ordered_jobs):
+        recency = 1.0 if job.get("is_current") else (0.75 if index == 1 else 0.55 if index == 2 else 0.35)
+        description = " ".join(str(job.get("description", "")).lower().split())
+        if description and description in seen_descriptions:
+            description = ""
+        elif description:
+            seen_descriptions.add(description)
+        text = f"{job.get('title', '')} {description}".lower()
 
+        hit_counts = {
+            name: sum(bool(re.search(pattern, text)) for pattern in group_patterns)
+            for name, group_patterns in patterns.items()
+        }
+        relevant_hits = (
+            hit_counts["retrieval"]
+            + hit_counts["ranking"]
+            + hit_counts["recommendation"]
+        )
+
+        if hit_counts["retrieval"]:
+            depth = min(1.0, 0.55 + 0.15 * (hit_counts["retrieval"] - 1))
+            dimensions["retrieval"] = max(dimensions["retrieval"], recency * depth)
+        if hit_counts["ranking"]:
+            depth = min(1.0, 0.55 + 0.15 * (hit_counts["ranking"] - 1))
+            dimensions["ranking"] = max(dimensions["ranking"], recency * depth)
+        if hit_counts["evaluation"] and relevant_hits:
+            depth = min(1.0, 0.55 + 0.15 * (hit_counts["evaluation"] - 1))
+            dimensions["evaluation"] = max(dimensions["evaluation"], recency * depth)
+        if hit_counts["operations"] and relevant_hits:
+            depth = min(1.0, 0.45 + 0.15 * (hit_counts["operations"] - 1))
+            dimensions["operations"] = max(dimensions["operations"], recency * depth)
+        if hit_counts["ownership"] and relevant_hits:
+            depth = min(1.0, 0.45 + 0.15 * (hit_counts["ownership"] - 1))
+            dimensions["ownership"] = max(dimensions["ownership"], recency * depth)
+
+        scale_hits = sum(bool(re.search(pattern, text)) for pattern in scale_patterns)
+        if scale_hits and relevant_hits:
+            depth = min(1.0, 0.55 + 0.20 * (scale_hits - 1))
+            dimensions["scale"] = max(dimensions["scale"], recency * depth)
+
+    possible = sum(weights.values())
+    return sum(dimensions[name] * weights[name] for name in dimensions) / possible
 
 def experience_score(candidate: dict) -> float:
     """Score based on years of experience — sweet spot 5–9 per JD."""
@@ -667,12 +1598,16 @@ def behavioral_multiplier(candidate: dict) -> float:
     if not signals.get("open_to_work_flag", True):
         multiplier *= 0.5
 
-    # Recency of platform activity
-    days_active = _days_since(signals.get("last_active_date", "2020-01-01"))
-    if days_active > 180:
-        multiplier *= 0.6
-    elif days_active > 90:
-        multiplier *= 0.8
+    # Recency of platform activity — penalize only if we have a valid, old date
+    # Missing data is neutral (1.0), not a penalty
+    last_active = signals.get("last_active_date")
+    if last_active:
+        days_active = _days_since(last_active)
+        # _days_since returns 9999 for invalid dates; only penalize if valid and old
+        if days_active < 9000 and days_active > 180:
+            multiplier *= 0.6
+        elif days_active < 9000 and days_active > 90:
+            multiplier *= 0.8
 
     # ── Engagement signals ────────────────────────────────────────────────────
 
@@ -687,13 +1622,15 @@ def behavioral_multiplier(candidate: dict) -> float:
     if notice <= 30:
         pass                      # 1.00 — ideal
     elif notice <= 60:
-        multiplier *= 0.97        # minor friction
+        multiplier *= 0.99        # minor friction
     elif notice <= 90:
-        multiplier *= 0.9        # moderate
+        multiplier *= 0.97        # explicitly still in scope in the JD
+    elif notice <= 120:
+        multiplier *= 0.94
     elif notice <= 150:
-        multiplier *= 0.82        # significant
+        multiplier *= 0.90        # significant
     else:
-        multiplier *= 0.70        # same as current
+        multiplier *= 0.82
 
 
     # ── Quality signals ───────────────────────────────────────────────────────
@@ -704,9 +1641,9 @@ def behavioral_multiplier(candidate: dict) -> float:
     # differentiation. These values keep github as a meaningful signal without hitting the cap.
     github_score = signals.get("github_activity_score", -1)
     if github_score >= 60:
-        multiplier *= 1.05
+        multiplier *= 1.02
     elif github_score >= 30:
-        multiplier *= 1.03
+        multiplier *= 1.01
     # -1 means no GitHub linked → no bonus, no penalty
 
     # Interview reliability — do they actually show up?
@@ -725,18 +1662,15 @@ def behavioral_multiplier(candidate: dict) -> float:
 # ─────────────────────────────────────────────
 
 WEIGHTS = {
-    "title_career": 0.35,
+    "title":        0.12,
+    "career_domain": 0.15,
+    "company_fit":  0.08,
     "skills":       0.30,
     "experience":   0.15,
     "location":     0.10,
-    # Reduced from 0.10 → 0.05. The JD itself states there is no education
-    # requirement (see education_score docstring); the freed 0.05 is moved
-    # into PRODUCTION_EVIDENCE_MAX_BONUS (0.07 → 0.12) so that concrete,
-    # recent evidence of owning a ranking/retrieval system in production
-    # counts for at least as much as which college a candidate attended.
-    # This is a structural change, not a per-candidate one — it shifts every
-    # candidate's ceiling the same way, whether or not they have evidence.
-    "education":    0.05,
+    # Reduced from 0.05 to 0.02. The JD has no education requirement.
+    # Education should mainly help detect contradictions, not materially rank.
+    "education":    0.02,
 }
 
 
@@ -768,69 +1702,82 @@ def score_candidate(candidate: dict) -> dict:
         is_honeypot: bool
         reasoning:   str (1–2 sentences, specific to this candidate)
     """
-    if is_honeypot(candidate):
+    integrity = evaluate_integrity(candidate)
+
+    if integrity["hard_fail"]:
         return {
             "score": 0.01,
             "components": {},
             "multiplier": 0.0,
             "is_honeypot": True,
-            "reasoning": (
-                "Profile contains impossible signals "
-                "(expert skills with no usage history) — likely honeypot candidate."
-            ),
+            "reasoning": "Integrity check failed: " + ", ".join(integrity["reasons"]),
         }
 
-    tc = title_career_score(candidate)
+    tt = title_score(candidate)
+    ce = career_evidence_score(candidate)
+    cf = company_fit_score(candidate)
     sk = skills_score(candidate)
     ex = experience_score(candidate)
     lo = location_score(candidate)
     ed = education_score(candidate)
 
     base = (
-        WEIGHTS["title_career"] * tc +
+        WEIGHTS["title"]        * tt +
+        WEIGHTS["career_domain"] * ce +
+        WEIGHTS["company_fit"]  * cf +
         WEIGHTS["skills"]       * sk +
         WEIGHTS["experience"]   * ex +
         WEIGHTS["location"]     * lo +
         WEIGHTS["education"]    * ed
     )
+    # PREV ===========================================================
+    # # Refine only the qualified bracket with concrete, recent evidence of
+    # # building and operating retrieval/ranking systems.
+    # production_evidence = 0.0
+    # if tc >= PRODUCTION_EVIDENCE_TC_GATE and sk >= PRODUCTION_EVIDENCE_SK_GATE:
+    #     production_evidence = production_evidence_score(candidate)
+    #     base += PRODUCTION_EVIDENCE_MAX_BONUS * production_evidence
+# ===========================================================
+    
+    production_evidence = production_evidence_score(candidate)
 
-    # Refine only the qualified bracket with concrete, recent evidence of
-    # building and operating retrieval/ranking systems.
-    production_evidence = 0.0
-    if tc >= PRODUCTION_EVIDENCE_TC_GATE and sk >= PRODUCTION_EVIDENCE_SK_GATE:
-        production_evidence = production_evidence_score(candidate)
-        base += PRODUCTION_EVIDENCE_MAX_BONUS * production_evidence
-
-    # Soft salary fit — Redrob Series A budget is approximately 25-70 LPA.
-    salary = candidate.get("redrob_signals", {}).get("expected_salary_range_inr_lpa", {})
-    salary_max = salary.get("max", 40)
-    if salary_max > 85:
-        base *= 0.93   # above likely budget ceiling
-    elif salary_max < 8:
-        base *= 0.95   # suspiciously low — possible data error or very junior
+    base += (
+        PRODUCTION_EVIDENCE_MAX_BONUS *
+        production_evidence
+    )
 
     bm = behavioral_multiplier(candidate)
-    final = min(1.0, base * bm)   # cap at 1.0
 
-    reasoning = _build_reasoning(candidate, tc, sk, ex, lo, bm, final)
+    final = min(1.0, base * bm)   # cap at 1.0
+    
+    final *= (0.80 + 0.20 * integrity["reliability"])
+
+    final = min(1.0, final)
+    
+    reasoning = _build_reasoning(candidate, tt, sk, ex, lo, bm, final)
 
     return {
         "score": round(final, 6),
         "components": {
-            "title_career": round(tc, 3),
-            "skills":       round(sk, 3),
-            "experience":   round(ex, 3),
-            "location":     round(lo, 3),
-            "education":    round(ed, 3),
+            "title": round(tt, 3),
+            "career_domain": round(ce, 3),
+            "company_fit": round(cf, 3),
+            "skills": round(sk, 3),
+            "experience": round(ex, 3),
+            "location": round(lo, 3),
+            "education": round(ed, 3),
             "production_evidence": round(production_evidence, 3),
         },
         "multiplier": round(bm, 3),
         "is_honeypot": False,
+        "integrity": integrity,
+        "integrity_reliability": round(integrity["reliability"], 2),
+        "integrity_reasons": integrity["reasons"],
         "reasoning": reasoning,
     }
 
 
-def _build_reasoning(candidate, tc, sk, ex, lo, bm, final) -> str:
+def _build_reasoning(candidate, tt, sk, ex, lo, bm, final) -> str:
     """
     Generate specific, honest, rank-consistent reasoning.
 
@@ -908,7 +1855,7 @@ def _build_reasoning(candidate, tc, sk, ex, lo, bm, final) -> str:
 
     else:
         # Weak candidate — honest, in long tail
-        if tc == 0.0:
+        if tt == 0.0:
             role_note = f"current role ({title}) is non-technical"
         elif skill_str:
             role_note = f"partial skill match: {skill_str}"
