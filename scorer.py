@@ -168,6 +168,12 @@ EVIDENCE_CATEGORIES = {
         # Concept-level additions: same system, production-team vocabulary.
         "relevance", "matching layer", "personalization", "discovery feed",
         "behavioral signal", "behavioral-signal",
+        # Implicit production vocabulary: engineers describe infrastructure without saying "retrieval"
+        "surface relevant", "relevant content", "match", "matching infrastructure",
+        "query understanding", "understand query", "query intent",
+        "information retrieval", "information need",
+        "ranking calibration", "calibrate ranking",
+        "index", "indexing",
     },
     "evaluation": {
         "offline evaluation", "online evaluation", "ndcg", "mrr",
@@ -179,10 +185,15 @@ EVIDENCE_CATEGORIES = {
         # Concept-level additions: defining what a ranking model optimizes for,
         # and the click/engagement metrics that feed that definition.
         "optimization target", "click-through", "click through",
+        # Implicit evaluation: engineers test ranking quality without saying "NDCG"
+        "ranking quality", "relevance quality", "ranking accuracy",
+        "offline metric", "online metric",
     },
     "ownership": {
         "owned", "designed", "built", "led", "shipped", "deployed",
         "architected", "end-to-end", "end to end",
+        # Implicit ownership: production engineers use these terms
+        "responsible", "maintain", "operated", "managed",
     },
     "operational": {
         "latency", "throughput", "qps", "monitoring", "feature store",
@@ -192,6 +203,9 @@ EVIDENCE_CATEGORIES = {
         # production-ML vocabulary rather than generic "monitoring".
         "drift detection", "retraining cadence", "feature monitoring",
         "embedding drift",
+        # Implicit operations: scale and serving language
+        "serving", "query volume", "scale", "infrastructure",
+        "caching", "cache layer", "database",
     },
 }
 
@@ -716,7 +730,15 @@ SIGNALS = {
         "pinecone", "pgvector",
         "ndcg", "mrr", "recall@k",
         "rerank", "reranking",
-        "search relevance"
+        "search relevance",
+        # Implicit retrieval vocabulary (production-team phrasing)
+        "matching layer", "match infrastructure",
+        "surface relevant", "relevant content",
+        "query understanding", "understand query",
+        "information retrieval", "information need",
+        "ranking calibration", "calibrate",
+        "index refresh", "indexing",
+        "query", "serving queries",
     },
 
     "recommendation": {
@@ -727,7 +749,9 @@ SIGNALS = {
         "matrix factorization",
         "personalization",
         "discovery feed",
-        "candidate matching"
+        "candidate matching",
+        # Implicit recommendation vocabulary
+        "suggest", "discovery", "match user",
     },
 
     "llm": {
@@ -763,7 +787,12 @@ SIGNALS = {
         "offline",
         "online",
         "ab test",
-        "a/b"
+        "a/b",
+        # Implicit operations vocabulary (scale & serving)
+        "serving", "query volume", "scale",
+        "infrastructure", "caching", "cache layer",
+        "database", "maintained", "operated",
+        "high availability",
     },
 
     "ownership": {
@@ -778,7 +807,9 @@ SIGNALS = {
         "rolled out",
         "launched",
         "shipped",
-        "mentored"
+        "mentored",
+        # Implicit ownership
+        "responsible", "managed", "team",
     },
 
     "impact": {
@@ -792,7 +823,9 @@ SIGNALS = {
         "30m",
         "35m",
         "50m",
-        "100m"
+        "100m",
+        # Implicit scale language
+        "billions", "thousands", "large", "massive",
     }
 }
 
@@ -922,11 +955,18 @@ def title_score(candidate):
         "software engineer", "sde", "backend", "platform engineer",
         "senior engineer",
     }
+    # Production-focused titles that imply systems/infrastructure work
+    production_title_terms = {
+        "production systems", "production engineer", "infrastructure engineer",
+        "systems engineer", "platform", "scale",
+    }
 
     if any(term in current_title for term in strong_title_terms):
         return 0.90
     elif any(term in current_title for term in moderate_title_terms):
         return 0.70
+    elif any(term in current_title for term in production_title_terms):
+        return 0.65  # Production-focused titles get modest boost
     elif any(term in current_title for term in generic_title_terms):
         return 0.50
     else:
@@ -1180,6 +1220,9 @@ CAPABILITY_GROUPS = {
             "indexing", "dense retrieval", "hybrid search", "hybrid retrieval",
             "dense passage retrieval", "dpr", "sentence transformers",
             "sentence-transformers", "sentence transformer",
+            # Implicit retrieval terminology
+            "matching", "matching layer", "matching infrastructure",
+            "relevance", "relevant", "index", "indexing",
         },
         "evidence": {
             "retrieval", "information retrieval", "search infrastructure",
@@ -1189,6 +1232,10 @@ CAPABILITY_GROUPS = {
             "embedding-based", "hybrid retrieval", "hybrid search", "dense retrieval",
             "bm25", "reranking", "re-ranking", "retrieval pipeline", "retrieval system",
             "retrieval-augmented generation", "rag",
+            # Implicit retrieval evidence
+            "matching layer", "surface relevant", "relevant content",
+            "query understanding", "query intent", "ranking calibration",
+            "index refresh", "serving queries", "query volume",
         },
     },
     "vector_infra": {
@@ -1392,11 +1439,18 @@ PRODUCTION_EVIDENCE_GROUPS = {
         "faiss", "qdrant", "weaviate", "milvus", "pgvector",
         "elasticsearch", "opensearch", "retrieval augmented generation",
         "rag",
+        # Implicit retrieval evidence
+        "matching layer", "match infrastructure",
+        "surface relevant", "relevant content", "relevance",
+        "query understanding", "query intent",
+        "index refresh", "indexing", "serving queries",
     },
     "ranking": {
         "learning to rank", "ltr", "ranking layer", "ranking model",
         "ranking pipeline", "ranking system", "reranking", "re-ranking",
         "reranker", "xgboost", "lightgbm", "gradient boosted",
+        # Implicit ranking evidence
+        "ranking calibration", "calibrate ranking", "ranking quality",
     },
     "recommendation": {
         "recommendation system", "recommender system",
@@ -1409,16 +1463,25 @@ PRODUCTION_EVIDENCE_GROUPS = {
         "a b test", "ab test", "a b testing", "ab testing", "calibration",
         "offline online correlation", "online offline correlation",
         "optimization target", "click through", "click through rate",
+        # Implicit evaluation evidence
+        "ranking quality", "relevance quality", "ranking accuracy",
+        "offline metric", "online metric",
     },
     "operations": {
         "latency", "p95", "p99", "throughput", "qps", "drift",
         "monitoring", "observability", "index refresh", "rollback",
         "feature store", "autoscaling", "caching", "built and operated",
         "production deployment",
+        # Implicit operations evidence
+        "serving", "query volume", "scale", "infrastructure",
+        "cache layer", "database", "maintained", "operated",
+        "high availability", "billions", "millions",
     },
     "ownership": {
         "owned", "led", "end to end", "from scratch", "designed",
         "architected", "rolled out", "deployed", "shipped",
+        # Implicit ownership
+        "responsible", "managed", "team", "built",
     },
 }
 
@@ -1619,6 +1682,44 @@ def education_score(candidate: dict) -> float:
     return min(1.0, best_tier_score + cs_field_bonus)
 
 
+def high_throughput_bonus(candidate: dict) -> float:
+    """
+    Bonus for candidates with explicit large-scale systems experience: handling 1M+ RPS,
+    custom data structures, lock-free implementations, microsecond latencies, distributed caching.
+    JD emphasizes systems-level optimization for inference workloads. Returns 1.0–1.15 multiplier.
+    """
+    career = candidate.get("career_history", [])
+    if not career:
+        return 1.0
+
+    scale_patterns = {
+        r"\b\d+[mk]?\s*(?:rps|requests?\s*per\s*second|qps)",
+        r"\b(?:lock.?free|lock-free|atomic|cas|compare.?and.?swap)",
+        r"\bredis\b",
+        r"\b(?:microsecond|sub.?millisecond|us latency|μs)",
+        r"\bcustom\s+(?:data\s+)?struct",
+        r"\b(?:memcached|distributed cache)",
+        r"\b\d+(?:[.,]\d+)?\s*[km](?:\+|plus)?\s*requests",
+    }
+
+    hit_count = 0
+
+    for job in career:
+        text = _normalize_match_text(f"{job.get('title', '')} {job.get('description', '')}")
+        for pattern in scale_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                hit_count += 1
+                if hit_count >= 3:
+                    return 1.15
+
+    if hit_count == 2:
+        return 1.10
+    elif hit_count == 1:
+        return 1.05
+
+    return 1.0
+
+
 def behavioral_multiplier(candidate: dict) -> float:
     """
     Availability / engagement multiplier applied to base score.
@@ -1734,7 +1835,7 @@ def score_candidate(candidate: dict) -> dict:
     Score a single candidate against the Senior AI Engineer JD.
 
     Returns:
-        score:       float 0.0–1.0 (final composite after behavioral multiplier)
+        score:       float 0.0–∞ (no hard 1.0 cap to allow deterministic tie-breaking)
         components:  dict of individual component scores
         multiplier:  float (behavioral multiplier applied)
         is_honeypot: bool
@@ -1768,15 +1869,7 @@ def score_candidate(candidate: dict) -> dict:
         WEIGHTS["location"]     * lo +
         WEIGHTS["education"]    * ed
     )
-    # PREV ===========================================================
-    # # Refine only the qualified bracket with concrete, recent evidence of
-    # # building and operating retrieval/ranking systems.
-    # production_evidence = 0.0
-    # if tc >= PRODUCTION_EVIDENCE_TC_GATE and sk >= PRODUCTION_EVIDENCE_SK_GATE:
-    #     production_evidence = production_evidence_score(candidate)
-    #     base += PRODUCTION_EVIDENCE_MAX_BONUS * production_evidence
-# ===========================================================
-    
+
     production_evidence = 0.0
     if tt >= PRODUCTION_EVIDENCE_TC_GATE and sk >= PRODUCTION_EVIDENCE_SK_GATE:
         production_evidence = production_evidence_score(candidate)
@@ -1788,12 +1881,33 @@ def score_candidate(candidate: dict) -> dict:
 
     bm = behavioral_multiplier(candidate)
 
-    final = min(1.0, base * bm)   # cap at 1.0
-    
+    # Apply systems-scale bonus for high-throughput engineering
+    throughput_bonus = high_throughput_bonus(candidate)
+
+    final = base * bm * throughput_bonus
+
+    # Integrity reliability adjustment (soft, not hard cap)
     final *= (0.80 + 0.20 * integrity["reliability"])
 
-    final = min(1.0, final)
-    
+    # **CRITICAL: Deterministic tie-breaking via micro-modifiers**
+    # Remove hard 1.0 cap to avoid massive score collapse among top candidates.
+    # Add micro-modifiers from redrob_signals to ensure every candidate has unique score.
+    signals = candidate.get("redrob_signals", {})
+    response_rate = signals.get("recruiter_response_rate", 0.0)
+    github_score = signals.get("github_activity_score", -1)
+    saved_30d = signals.get("saved_by_recruiters_30d", 0)
+
+    tiebreaker = (
+        response_rate * 0.0001 +
+        max(0, github_score) * 0.00001 +
+        saved_30d * 0.000001
+    )
+    final += tiebreaker
+
+    # Soft ceiling at 1.0, but allow above for tie-breaking precision
+    # (rank.py will normalize if needed for output)
+    final = max(0.0, final)
+
     reasoning = _build_reasoning(candidate, tt, sk, ex, lo, bm, final)
 
     return {
