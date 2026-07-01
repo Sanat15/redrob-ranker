@@ -379,6 +379,99 @@ class TestProductionEvidenceScore:
         assert production_evidence_score(c) == 0.0
 
 
+class TestConceptLevelProductionEvidence:
+    """
+    v3 audit fixes: production ranking ownership described in
+    XGBoost/LightGBM/production terminology should be recognized as evidence,
+    mapped into the same 4 categories — not via new candidate-specific keywords.
+    """
+
+    def test_ab_testing_gerund_form_matches_evaluation(self):
+        """'A/B testing' (not 'A/B test') was previously unmatched — real bug."""
+        c = make_candidate(career=[{
+            "company": "Flipkart",
+            "title": "Machine Learning Engineer",
+            "duration_months": 24,
+            "is_current": True,
+            "description": "Built the feature pipeline and the A/B testing infrastructure.",
+        }])
+        # relevant_systems: none here on purpose — isolate the evaluation match.
+        c["career_history"][0]["description"] += " Owned the ranking model rollout."
+        result = production_evidence_score(c)
+        assert result > 0.0
+        # Confirm evaluation category specifically is what's contributing.
+        career = c["career_history"]
+        text = f"{career[0]['title']} {career[0]['description']}"
+        from scorer import _contains_evidence_term
+        assert _contains_evidence_term(text, "a/b testing")
+
+    def test_offline_online_correlation_cooccurrence_matches_evaluation(self):
+        """
+        'Offline metrics that correlated with online engagement' should count
+        as evaluation evidence even without literal 'NDCG' or 'A/B test'.
+        """
+        from scorer import _has_offline_online_correlation
+        assert _has_offline_online_correlation(
+            "building offline metrics that actually correlated with online engagement"
+        )
+        assert _has_offline_online_correlation(
+            "online/offline metric correlation"
+        )
+        assert not _has_offline_online_correlation(
+            "shipped the feature in production"
+        )
+
+    def test_generic_relevance_phrasing_matches_relevant_systems(self):
+        """
+        'Connect users to relevant matches' is the same system as 'semantic
+        search', described in plain English rather than IR vocabulary.
+        """
+        c = make_candidate(career=[{
+            "company": "Meta",
+            "title": "Senior AI Engineer",
+            "duration_months": 24,
+            "is_current": True,
+            "description": (
+                "Built systems that understand what users are looking for and "
+                "connect them to the most relevant matches across a large dataset."
+            ),
+        }])
+        assert production_evidence_score(c) > 0.0
+
+    def test_drift_detection_matches_operational(self):
+        c = make_candidate(career=[{
+            "company": "Glance",
+            "title": "Senior ML Engineer",
+            "duration_months": 24,
+            "is_current": True,
+            "description": (
+                "Owned feature monitoring, drift detection, and retraining "
+                "cadence for the ranking model."
+            ),
+        }])
+        from scorer import _contains_evidence_term
+        text = "Senior ML Engineer Owned feature monitoring, drift detection, and retraining cadence for the ranking model."
+        assert _contains_evidence_term(text, "drift detection")
+        assert _contains_evidence_term(text, "retraining cadence")
+        assert production_evidence_score(c) > 0.0
+
+    def test_optimization_target_matches_evaluation(self):
+        c = make_candidate(career=[{
+            "company": "Swiggy",
+            "title": "Recommendation Systems Engineer",
+            "duration_months": 24,
+            "is_current": True,
+            "description": (
+                "Trained ranking models for the discovery feed using XGBoost. "
+                "Worked with PMs to define the optimization target "
+                "(click-through vs. dwell time)."
+            ),
+        }])
+        result = production_evidence_score(c)
+        # relevant_systems (ranking) + evaluation (optimization target/click-through)
+        assert result >= 0.5
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Experience score
 # ─────────────────────────────────────────────────────────────────────────────
@@ -599,7 +692,8 @@ class TestScoreCandidate:
         boosted = score_candidate(with_evidence)
         assert boosted["components"]["production_evidence"] == 1.0
         # Default fixture github=45 → ×1.03 (moderate tier).
-        assert boosted["score"] - plain["score"] == pytest.approx(0.07 * 1.03)
+        # Cap raised 0.07 → 0.12 (v3 rebalance: education 0.10 → 0.05 moved here).
+        assert boosted["score"] - plain["score"] == pytest.approx(0.12 * 1.03)
 
         weak = make_candidate(
             title="Software Engineer",

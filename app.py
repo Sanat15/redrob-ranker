@@ -29,9 +29,12 @@ with st.sidebar:
       0.30 × skills        +
       0.15 × experience    +
       0.10 × location      +
-      0.10 × education
+      0.05 × education     +
+      production_evidence_bonus (up to +0.12)
     ) × behavioral_multiplier
     ```
+    Education dropped 0.10 → 0.05 (JD has no education requirement);
+    that budget moved into the production-evidence bonus instead.
 
     **Skills trust formula** (defeats keyword stuffing):
     ```
@@ -184,7 +187,7 @@ with tab_rank:
             .rename(columns={
                 "rank": "Rank", "candidate_id": "ID", "title": "Title",
                 "tc": "Title/Career (35%)", "sk": "Skills (30%)",
-                "ex": "Exp (15%)", "lo": "Location (10%)", "ed": "Edu (10%)",
+                "ex": "Exp (15%)", "lo": "Location (10%)", "ed": "Edu (5%)",
                 "bm": "Behavioral ×", "score": "Final Score",
             })
         )
@@ -228,9 +231,9 @@ with tab_rank:
                         "Score": f"{row['lo']:.3f}",
                         "Weighted": f"{row['lo'] * 0.10:.3f}",
                     }, {
-                        "Component": "Education (10%)",
+                        "Component": "Education (5%)",
                         "Score": f"{row['ed']:.3f}",
-                        "Weighted": f"{row['ed'] * 0.10:.3f}",
+                        "Weighted": f"{row['ed'] * 0.05:.3f}",
                     }])
                     st.dataframe(comp_df, use_container_width=True, hide_index=True)
 
@@ -351,14 +354,21 @@ with tab_how:
     Pune/Noida preferred; Hyderabad/Mumbai/Delhi NCR welcome. Outside India = heavy penalty
     unless candidate is willing to relocate.
 
-    #### Component 5 — Education (10%)
-    Institution tier + CS field bonus. Weak signal — the JD has no educational requirements.
+    #### Component 5 — Education (5%)
+    Institution tier + CS field bonus. Weak signal — the JD has no educational
+    requirements — deliberately capped low so it can't outweigh real production evidence.
 
-    #### Production Evidence Bonus (up to +0.07)
+    #### Production Evidence Bonus (up to +0.12)
     Qualified candidates (`title/career ≥ 0.60` and `skills ≥ 0.35`) receive a
     category-based bonus for concrete evidence of relevant systems, evaluation,
     ownership, and production operations. Categories count once and are weighted
     by job recency (current 1.0, second 0.7, older 0.4).
+
+    Each category recognizes both IR vocabulary (BM25, NDCG, "learning to rank")
+    **and** production-ranking vocabulary (XGBoost/LightGBM discovery-feed
+    ranking, "optimization target", offline-online metric correlation, drift
+    detection/retraining cadence) — so a candidate who describes the same
+    ranking-ownership work without IR jargon isn't penalized for word choice.
 
     ---
     #### Behavioral Multiplier (multiplicative, 0.25× – 1.1×)

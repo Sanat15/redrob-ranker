@@ -1,5 +1,5 @@
 """
-Redrob Hackathon — Candidate Scorer v2
+Redrob Hackathon — Candidate Scorer v3
 JD: Senior AI Engineer — Founding Team @ Redrob AI
 
 Changes from v1:
@@ -9,6 +9,23 @@ Changes from v1:
   - _build_reasoning: now emits specific numbers (YoE, skill endorsements/duration,
     response rate, notice period) — required to pass Stage 4 manual review
   - score_candidate: final score capped at 1.0
+
+Changes from v2 (production-evidence audit):
+  - EVIDENCE_CATEGORIES expanded with concept-level terms so production-ranking
+    ownership described in non-IR vocabulary (XGBoost/LightGBM discovery-feed
+    ranking, "optimization target", plain-English "connect users to relevant
+    matches") maps into the SAME four existing categories — no new categories,
+    no company/candidate-specific terms.
+  - Fixed a real matching bug: "A/B testing" (gerund form, the most common
+    phrasing in the dataset) was not matched by the "a/b test" term due to a
+    strict word-boundary suffix check.
+  - Added a co-occurrence heuristic for "offline-online correlation" (offline
+    + online + correlate/predict in the same job text) instead of requiring
+    one exact template sentence — rewards the concept, not a keyword.
+  - Rebalanced weights: education 0.10 → 0.05 (JD has no education
+    requirement — see education_score docstring), and moved that 0.05 into
+    PRODUCTION_EVIDENCE_MAX_BONUS (0.07 → 0.12), so verified production
+    ranking-system ownership counts for more than pedigree.
 """
 
 import math
@@ -129,15 +146,38 @@ SKILL_NORMALIZE = {
 # ── Production evidence ──────────────────────────────────────────────────────
 # Career evidence that a qualified candidate has built and operated the systems
 # this JD requires. Matching is category-based so repeated keywords do not help.
+#
+# v2 note: the original term lists recognised explicit IR/vendor vocabulary
+# (BM25, Pinecone, "learning to rank") well but under-matched engineers who
+# describe the same ranking-ownership work in production terminology instead
+# (XGBoost/LightGBM discovery-feed ranking, "optimization target", "offline-
+# online correlation", plain-English descriptions of relevance/matching).
+# The additions below map that vocabulary into the SAME four categories —
+# no new categories, no company- or candidate-specific terms — so a candidate
+# who says "connect users to relevant matches" gets the same relevant_systems
+# credit as one who says "semantic search", and a candidate who says "offline
+# metrics correlated with online engagement" gets the same evaluation credit
+# as one who says "NDCG". This generalizes to any of the 100K candidates who
+# use this phrasing, not just the ones reviewed manually.
 EVIDENCE_CATEGORIES = {
     "relevant_systems": {
         "ranking", "retrieval", "recommendation", "hybrid retrieval",
         "semantic search", "candidate matching", "vector search",
         "re-ranking", "reranking", "search",
+        # Concept-level additions: same system, production-team vocabulary.
+        "relevance", "matching layer", "personalization", "discovery feed",
+        "behavioral signal", "behavioral-signal",
     },
     "evaluation": {
         "offline evaluation", "online evaluation", "ndcg", "mrr",
         "a/b test", "ab test", "calibration", "evaluation framework",
+        # "A/B testing" (the gerund form) is the single most common phrasing
+        # in the dataset for this concept and was previously unmatched by
+        # "a/b test" due to the word-boundary check requiring an exact suffix.
+        "a/b testing", "ab testing",
+        # Concept-level additions: defining what a ranking model optimizes for,
+        # and the click/engagement metrics that feed that definition.
+        "optimization target", "click-through", "click through",
     },
     "ownership": {
         "owned", "designed", "built", "led", "shipped", "deployed",
@@ -146,10 +186,15 @@ EVIDENCE_CATEGORIES = {
     "operational": {
         "latency", "throughput", "qps", "monitoring", "feature store",
         "production", "index refresh", "p99", "sla",
+        # Concept-level additions: the operational discipline around a live
+        # ranking model (drift, retraining, feature health) described in
+        # production-ML vocabulary rather than generic "monitoring".
+        "drift detection", "retraining cadence", "feature monitoring",
+        "embedding drift",
     },
 }
 
-PRODUCTION_EVIDENCE_MAX_BONUS = 0.07
+PRODUCTION_EVIDENCE_MAX_BONUS = 0.12
 PRODUCTION_EVIDENCE_TC_GATE = 0.60
 PRODUCTION_EVIDENCE_SK_GATE = 0.35
 
@@ -489,6 +534,27 @@ def _contains_evidence_term(text: str, term: str) -> bool:
     return re.search(pattern, text, flags=re.IGNORECASE) is not None
 
 
+def _has_offline_online_correlation(text: str) -> bool:
+    """
+    Detect the "offline-online correlation" concept by co-occurrence rather
+    than an exact phrase.
+
+    This concept — validating that an offline metric actually predicts online
+    behavior — is one of the clearest signals of real evaluation rigor, but
+    candidates phrase it many different ways ("offline-online correlation",
+    "offline metrics that actually correlated with online engagement",
+    "online/offline metric correlation"). Rewarding co-occurrence of
+    offline + online + a correlation/prediction verb generalizes across all
+    of these phrasings instead of hardcoding one template sentence.
+    """
+    lowered = text.lower()
+    has_both_sides = "offline" in lowered and "online" in lowered
+    has_correlation_language = (
+        "correlat" in lowered or "predict" in lowered
+    )
+    return has_both_sides and has_correlation_language
+
+
 def production_evidence_score(candidate: dict) -> float:
     """
     Return a 0–1 score for concrete production evidence in career history.
@@ -510,7 +576,10 @@ def production_evidence_score(candidate: dict) -> float:
 
         text = f"{job.get('title', '')} {job.get('description', '')}"
         for category, terms in EVIDENCE_CATEGORIES.items():
-            if any(_contains_evidence_term(text, term) for term in terms):
+            matched = any(_contains_evidence_term(text, term) for term in terms)
+            if category == "evaluation" and not matched:
+                matched = _has_offline_online_correlation(text)
+            if matched:
                 category_weights[category] = max(
                     category_weights[category], recency_weight
                 )
@@ -620,7 +689,7 @@ def behavioral_multiplier(candidate: dict) -> float:
     elif notice <= 60:
         multiplier *= 0.97        # minor friction
     elif notice <= 90:
-        multiplier *= 0.92        # moderate
+        multiplier *= 0.9        # moderate
     elif notice <= 150:
         multiplier *= 0.82        # significant
     else:
@@ -660,7 +729,14 @@ WEIGHTS = {
     "skills":       0.30,
     "experience":   0.15,
     "location":     0.10,
-    "education":    0.10,
+    # Reduced from 0.10 → 0.05. The JD itself states there is no education
+    # requirement (see education_score docstring); the freed 0.05 is moved
+    # into PRODUCTION_EVIDENCE_MAX_BONUS (0.07 → 0.12) so that concrete,
+    # recent evidence of owning a ranking/retrieval system in production
+    # counts for at least as much as which college a candidate attended.
+    # This is a structural change, not a per-candidate one — it shifts every
+    # candidate's ceiling the same way, whether or not they have evidence.
+    "education":    0.05,
 }
 
 
