@@ -43,8 +43,9 @@ final_score = (
     0.30 × skills_score        +
     0.15 × experience_score    +
     0.10 × location_score      +
-    0.10 × education_score
+    0.05 × education_score
 ) × behavioral_multiplier
++ production_evidence_bonus (up to +0.12)
 ```
 
 ### Skills trust formula (the anti-keyword-stuffing mechanism)
@@ -67,11 +68,15 @@ should score worse than an available good one.
 | Signal | Effect |
 |---|---|
 | `open_to_work_flag = false` | ×0.5 |
-| Inactive 90–180 / 180+ days | ×0.8 / ×0.6 |
-| Recruiter response rate < 10% / < 25% | ×0.7 / ×0.85 |
-| Notice period > 150 / > 90 days | ×0.70 / ×0.85 |
-| GitHub activity ≥ 60 / ≥ 30 | ×1.10 / ×1.05 |
-| Interview completion rate < 0.4 / < 0.6 | ×0.85 / ×0.92 |
+| Inactive 180+ days | ×0.6 |
+| Inactive 90–180 days | ×0.8 |
+| Recruiter response rate < 10% | ×0.7 |
+| Recruiter response rate < 25% | ×0.85 |
+| Notice period > 150 days | ×0.70 |
+| Notice period > 90 days | ×0.85 |
+| GitHub activity ≥ 60 | ×1.10 |
+| Interview completion rate < 0.4 | ×0.85 |
+| Interview completion rate < 0.6 | ×0.92 |
 | Floor | max(0.25, multiplier) |
 
 ### Hard disqualifiers → score 0.0
@@ -104,7 +109,7 @@ should score worse than an available good one.
 | `scorer.py` | Core scoring engine — five components + behavioral multiplier + honeypot detection + reasoning generator |
 | `rank.py` | CLI pipeline — streams candidates, keeps a 100-entry min-heap, writes the submission CSV |
 | `diagnose.py` | Full-100K diagnostic — score distribution, problem checks (honeypot rate, non-tech titles in top 100, etc.) |
-| `test_scorer.py` | 59 unit tests across 7 test classes, incl. a regression anchor on the known rank-1 candidate |
+| `test_scorer.py` | 72 unit tests across 7 test classes, incl. v3 semantic matching and production-evidence tests |
 | `app.py` | Streamlit sandbox — upload up to 100 candidate profiles, see ranked output + score breakdown live |
 | `submission_metadata.yaml` | Filled submission metadata (team, approach, design decisions, technical specs) |
 | `Dockerfile` | Reproducible container for the Stage 3 evaluation run |
@@ -171,30 +176,37 @@ O(N log N), with only `K=100` entries in memory at any time regardless of datase
 | `saved_by_recruiters_30d` as tiebreaker only | Using it as a score multiplier collapsed 10 candidates to an identical 1.0000, destroying NDCG@10 differentiation |
 | `heapq` min-heap | O(N log K) vs. O(N log N); constant ~100-entry memory footprint |
 | Consulting-firm penalty ×0.4 | Directly encodes the JD's explicit disqualifier for consulting-only careers |
-| Education weighted at only 10% | The JD states no educational requirement; production experience matters far more |
+| Education weighted at only 5% | The JD states no educational requirement; production experience matters far more |
+| Production-evidence bonus cap at 0.12 | Verified production ranking/retrieval ownership is the strongest signal for the role |
+| Concept-level semantic matching | Production-ML vocabulary (XGBoost, discovery feed, optimization target) now matches IR equivalents |
 
 ---
 
 ## Results snapshot
 
-Full 100K diagnostic (scorer v2.1), top 10 of 100:
+Full 100K diagnostic (scorer v3), top 10 of 100:
 
-| Rank | Score | YoE | Title | Company | City |
-|---|---|---|---|---|---|
-| 1 | 0.9866 | 5.4 | NLP Engineer | Glance | Chandigarh |
-| 2 | 0.9658 | 6.9 | AI Engineer | Microsoft | Trivandrum |
-| 3 | 0.9630 | 7.8 | Senior AI Engineer | Netflix | Vizag |
-| 4 | 0.9597 | 7.2 | Senior ML Engineer | Zomato | Noida |
-| 5 | 0.9486 | 6.5 | Recommendation Systems Eng | Amazon | Pune |
-| 6 | 0.9479 | 8.6 | Staff ML Engineer | Yellow.ai | Jaipur |
-| 7 | 0.9383 | 8.9 | Senior NLP Engineer | Salesforce | Coimbatore |
-| 8 | 0.9363 | 7.0 | Staff ML Engineer | Paytm | Kochi |
-| 9 | 0.9351 | 8.0 | Recommendation Systems Eng | CRED | Noida |
-| 10 | 0.9310 | 4.2 | Search Engineer | Verloop.io | Mumbai |
+| Rank | Score | ID |
+|---|---|---|
+| 1 | 0.9896 | CAND_0018499 |
+| 2 | 0.9769 | CAND_0061257 |
+| 3 | 0.9696 | CAND_0052328 |
+| 4 | 0.9613 | CAND_0079387 |
+| 5 | 0.9537 | CAND_0071974 |
+| 6 | 0.9446 | CAND_0046064 |
+| 7 | 0.9427 | CAND_0006567 |
+| 8 | 0.9422 | CAND_0081846 |
+| 9 | 0.9382 | CAND_0077337 |
+| 10 | 0.9349 | CAND_0002025 |
 
-Sanity checks on the top 100: 0 honeypots, 0 non-tech titles, 0 candidates with
-salary expectations > ₹80 LPA, 6 non-India candidates (all at strong product
-companies, ranked 49+, consistent with the JD's "outside India: case-by-case").
+**v3 improvements:** Semantic matching expanded to recognize production-ML vocabulary
+(XGBoost/LightGBM, discovery feed, optimization target, offline-online correlation,
+drift detection, retraining cadence) as equivalent to IR jargon; education weight
+reduced from 10% → 5%; production-evidence bonus cap increased 7% → 12%. Results in
+100 unique scores (no ties at 1.0), 0 honeypots, strong spread across top 100.
+
+Sanity checks on the top 100: 0 honeypots, 0 non-tech titles, spread 0.681–0.990,
+all production-evidence bonus recipients have verified ranking/retrieval ownership evidence.
 
 Full methodology and the rest of the top 100 are in the progress logs and the
 submission PDF deck.

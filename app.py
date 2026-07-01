@@ -33,8 +33,10 @@ with st.sidebar:
       production_evidence_bonus (up to +0.12)
     ) × behavioral_multiplier
     ```
-    Education dropped 0.10 → 0.05 (JD has no education requirement);
-    that budget moved into the production-evidence bonus instead.
+    **v3 updates:** Education 0.10 → 0.05 (JD has no education requirement);
+    production-evidence bonus cap increased 0.07 → 0.12; improved semantic
+    matching for concept-level ranking/retrieval vocabulary (production ML
+    team phrasing now matches IR jargon equivalently).
 
     **Skills trust formula** (defeats keyword stuffing):
     ```

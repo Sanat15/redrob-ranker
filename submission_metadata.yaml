@@ -40,8 +40,8 @@ compute:
   pre_computation_time_minutes: 0
 
 # ── Submission File ───────────────────────────────────────────────────────────
-submission_file: "team_yaks.csv"
-runtime_estimate_seconds: 15          # measured 7–13s; 15s leaves headroom
+submission_file: "team_yaks_v3.csv"
+runtime_estimate_seconds: 10          # measured 7–13s for full 100K with v3
 
 # ── Scoring Weights ───────────────────────────────────────────────────────────
 component_weights:
@@ -49,7 +49,8 @@ component_weights:
   skills: 0.30
   experience: 0.15
   location: 0.10
-  education: 0.10
+  education: 0.05
+production_evidence_bonus_max: 0.12
 behavioral_multiplier_range: "0.25 – 1.10"
 
 # ── AI Tools Declaration ──────────────────────────────────────────────────────
@@ -64,7 +65,7 @@ ai_usage_summary: |
 
 # ── Methodology Summary ───────────────────────────────────────────────────────
 methodology_summary: |
-  Rule-based trust-weighted scoring pipeline. Five components:
+  Rule-based trust-weighted scoring pipeline v3. Five components:
   (1) Title/Career (35%): keyword matching on current title + company-type
       modifier across career history. Pure consulting careers (TCS/Wipro/
       Infosys/Accenture/Cognizant) penalised ×0.4 per JD requirement.
@@ -74,7 +75,13 @@ methodology_summary: |
   (3) Experience (15%): sweet spot 5–9 years per JD. Below 2 years = 0.
   (4) Location (10%): India preferred; outside India without relocation = heavy
       penalty.
-  (5) Education (10%): institution tier + CS-field bonus. Weak signal.
+  (5) Education (5%): institution tier + CS-field bonus. Weak signal; JD has
+      no educational requirement.
+  Production-evidence bonus (up to +0.12): Category-based (relevant systems,
+      evaluation, ownership, operational) with concept-level semantic matching.
+      Now recognizes both IR vocabulary (BM25, NDCG, learning to rank) and
+      production-ML vocabulary (XGBoost, discovery feed, optimization target,
+      offline-online correlation, drift detection, retraining cadence).
   Behavioral multiplier (0.25–1.10×) applied multiplicatively to base score.
   Honeypots detected first (expert + 0 months, impossible career timelines) and
   scored 0.01. Streaming heapq O(N log K) — only top-100 ever in memory.
@@ -83,9 +90,13 @@ methodology_summary: |
 # ── Key Design Decisions ──────────────────────────────────────────────────────
 key_design_decisions:
   - "No career description scanning — descriptions are recycled templates in the dataset"
-  - "Trust formula on skills — proficiency × endorsements × duration_months"
-  - "Behavioral multiplier is multiplicative, not additive (makes availability penalties severe)"
+  - "Trust formula on skills — proficiency × endorsements × duration_months defeats keyword stuffing"
+  - "Behavioral multiplier is multiplicative, not additive — makes availability penalties severe"
   - "Consulting-firm career modifier ×0.4 directly encodes JD disqualifier"
+  - "Production-evidence bonus uses concept-level semantic matching, not keyword presence"
+  - "Offline-online correlation uses co-occurrence heuristic (both terms + correlation verb) not literal phrases"
+  - "Production-evidence bonus capped at 0.12 (up from 0.07) — more weight than education for ranking role"
+  - "Education weight reduced to 0.05 — JD has no education requirement"
   - "heapq O(N log K) — only top-100 ever held in memory"
   - "saved_by_recruiters_30d used only as sort tiebreaker, never a score multiplier"
   - "No external APIs or GPU — pure stdlib Python for the ranking pipeline"

@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
 Benchmarking script for ranker & scorer on full 100K candidate dataset
-Measures execution time and throughput for the Redrob AI candidate ranking pipeline
+Measures execution time and throughput for the Redrob AI candidate ranking pipeline (v3)
+
+Scorer v3 improvements:
+  - Concept-level semantic matching: production-ML vocabulary now matches IR equivalents
+  - Production-evidence bonus cap increased 0.07 → 0.12
+  - Education weight reduced 0.10 → 0.05
+  - Offline-online correlation uses co-occurrence heuristic
 """
 import json
 import time
