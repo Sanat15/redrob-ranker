@@ -40,18 +40,26 @@ compute:
   pre_computation_time_minutes: 0
 
 # ── Submission File ───────────────────────────────────────────────────────────
-submission_file: "team_yaks_v3.csv"
-runtime_estimate_seconds: 10          # measured 7–13s for full 100K with v3
+# NOTE: filename must be the team's registered participant ID before final
+# upload (per submission_spec.md Section 2) — update to match at submit time.
+submission_file: "team_yaks_v4.csv"
+runtime_estimate_seconds: 90          # measured ~70-90s for full 100K with v4
 
 # ── Scoring Weights ───────────────────────────────────────────────────────────
+# title_career (35%) is now split into three independently-weighted
+# components so a strong title alone can't carry a weak career history.
 component_weights:
-  title_career: 0.35
+  title: 0.12
+  career_domain: 0.15
+  company_fit: 0.08
   skills: 0.30
   experience: 0.15
   location: 0.10
-  education: 0.05
+  education: 0.02
 production_evidence_bonus_max: 0.12
-behavioral_multiplier_range: "0.25 – 1.10"
+behavioral_multiplier_range: "0.25 – 1.02"
+high_throughput_bonus_range: "1.0 – 1.15 (gated behind title/skills relevance)"
+hard_gate_multiplier_range: "0.15 – 1.0 (non-tech title / consulting-only / impossible location / CV-without-NLP-IR)"
 
 # ── AI Tools Declaration ──────────────────────────────────────────────────────
 ai_tools_used:
@@ -65,38 +73,40 @@ ai_usage_summary: |
 
 # ── Methodology Summary ───────────────────────────────────────────────────────
 methodology_summary: |
-  Rule-based trust-weighted scoring pipeline v3. Five components:
-  (1) Title/Career (35%): keyword matching on current title + company-type
-      modifier across career history. Pure consulting careers (TCS/Wipro/
-      Infosys/Accenture/Cognizant) penalised ×0.4 per JD requirement.
-  (2) Skills (30%): trust formula = proficiency_weight × min(1, endorsements/25)
-      × min(1, duration_months/18). Expert skill with 0 months = 0.0 trust.
-      Defeats keyword stuffing without any ML.
-  (3) Experience (15%): sweet spot 5–9 years per JD. Below 2 years = 0.
-  (4) Location (10%): India preferred; outside India without relocation = heavy
-      penalty.
-  (5) Education (5%): institution tier + CS-field bonus. Weak signal; JD has
-      no educational requirement.
-  Production-evidence bonus (up to +0.12): Category-based (relevant systems,
-      evaluation, ownership, operational) with concept-level semantic matching.
-      Now recognizes both IR vocabulary (BM25, NDCG, learning to rank) and
-      production-ML vocabulary (XGBoost, discovery feed, optimization target,
-      offline-online correlation, drift detection, retraining cadence).
-  Behavioral multiplier (0.25–1.10×) applied multiplicatively to base score.
-  Honeypots detected first (expert + 0 months, impossible career timelines) and
-  scored 0.01. Streaming heapq O(N log K) — only top-100 ever in memory.
-  Runtime: 7–13 seconds for 100K candidates on CPU.
+  Rule-based trust-weighted scoring pipeline v4. Seven weighted components:
+  title (12%), career_domain (15%), company_fit (8%), skills (30%),
+  experience (15%), location (10%), education (2%). Skills use a trust
+  formula = proficiency_weight × min(1, endorsements/25) × min(1,
+  duration_months/18) — an expert skill with 0 months used = 0.0 trust,
+  defeating keyword stuffing without any ML. Production-evidence bonus
+  (up to +0.12) is category-based (retrieval/ranking/recommendation,
+  evaluation, ownership, operations, scale) with concept-level semantic
+  matching, recognizing both IR vocabulary (BM25, NDCG) and production-ML
+  vocabulary (XGBoost, discovery feed, offline-online correlation).
+  Behavioral multiplier (0.25-1.02x) applied multiplicatively. A full
+  100K-candidate audit found three JD-explicit disqualifiers (non-tech
+  title, pure-consulting career, outside-India+non-relocating+onsite)
+  still reaching moderate scores on the other 80-90% of component weight,
+  so v4 adds explicit multiplicative hard gates for those three plus a
+  fourth for CV/speech-without-NLP/IR exposure, closes a loophole where
+  the high-throughput bonus applied to unrelated roles, and fixes a
+  title-chaser job-hopping loophole in the career-progression bonus.
+  Honeypots (expert+0-months skills, impossible career timelines,
+  reversed dates) detected first, scored 0.01. Streaming heapq
+  O(N log K) — only top-100 ever in memory. Runtime: ~70-90s for 100K
+  candidates on CPU.
 
 # ── Key Design Decisions ──────────────────────────────────────────────────────
 key_design_decisions:
-  - "No career description scanning — descriptions are recycled templates in the dataset"
+  - "Career descriptions ARE scanned (career_evidence_score, production_evidence_score) — category-based signal matching, not raw keyword frequency, so recycled templates can't be gamed by repetition"
   - "Trust formula on skills — proficiency × endorsements × duration_months defeats keyword stuffing"
   - "Behavioral multiplier is multiplicative, not additive — makes availability penalties severe"
-  - "Consulting-firm career modifier ×0.4 directly encodes JD disqualifier"
+  - "Consulting-firm career modifier is 0.45 (company_fit_score), plus a v4 ×0.35 hard-gate multiplier on the whole score — the 8% component weight alone let a pure-consulting profile reach rank 232 in a full 100K audit"
   - "Production-evidence bonus uses concept-level semantic matching, not keyword presence"
   - "Offline-online correlation uses co-occurrence heuristic (both terms + correlation verb) not literal phrases"
   - "Production-evidence bonus capped at 0.12 (up from 0.07) — more weight than education for ranking role"
-  - "Education weight reduced to 0.05 — JD has no education requirement"
+  - "Education weight reduced to 0.02 (10% -> 5% -> 2%) — JD has no education requirement"
+  - "v4 hard gates (non-tech title x0.15, consulting-only x0.35, impossible-location x0.55, CV/speech-without-NLP-IR x0.80) close a real gap found by auditing the full 100K dataset, not a theoretical one"
   - "heapq O(N log K) — only top-100 ever held in memory"
   - "saved_by_recruiters_30d used only as sort tiebreaker, never a score multiplier"
   - "No external APIs or GPU — pure stdlib Python for the ranking pipeline"

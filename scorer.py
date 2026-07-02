@@ -1,5 +1,5 @@
 """
-Redrob Hackathon — Candidate Scorer v3
+Redrob Hackathon — Candidate Scorer v4
 JD: Senior AI Engineer — Founding Team @ Redrob AI
 
 Changes from v1:
@@ -26,6 +26,47 @@ Changes from v2 (production-evidence audit):
     requirement — see education_score docstring), and moved that 0.05 into
     PRODUCTION_EVIDENCE_MAX_BONUS (0.07 → 0.12), so verified production
     ranking-system ownership counts for more than pedigree.
+
+Changes from v3 (full-100K audit of JD-explicit disqualifiers):
+  - hard_gate_multiplier(): three JD-explicit "we will not move forward" /
+    "case-by-case" profiles were only losing weight in ONE small component
+    (title 12%, company_fit 8%, location 10%) — the rest of the weighted sum
+    was untouched, and a full 100K audit found a pure-Accountant profile
+    reaching 0.36 and a pure-consulting-career profile reaching 0.45, both
+    uncomfortably close to the ~0.53 rank-100 cutoff. Non-tech titles and
+    pure-consulting careers now get an explicit, heavier multiplicative
+    gate (×0.15 / ×0.35); logistically-impossible locations (outside India,
+    unwilling to relocate, needs onsite/hybrid) get a milder ×0.55 gate,
+    since the JD's own language for that case is "case-by-case", not "will
+    not move forward" — this also matches our own manual-review calibration
+    (rank.md), which placed such a candidate mid-tier, not deep-tail.
+  - _cv_speech_dominant_multiplier(): implements the JD's explicit "primary
+    expertise is computer vision, speech, or robotics without significant
+    NLP/IR exposure" exclusion, which had no implementation at all before
+    this pass. Matches on career TEXT (not the skills list, to avoid
+    penalizing a stray skill entry), and only fires when there is ZERO
+    retrieval/ranking/recommendation evidence anywhere in the career.
+  - _career_progression_bonus(): no longer rewards title-level climbs
+    (Engineer → Senior → Staff → …) earned via a string of sub-18-month
+    job-hops — the JD explicitly calls this "title-chaser" pattern out.
+  - high_throughput_bonus() is now gated behind the same title/skills
+    relevance bar as production_evidence_score(), so mentioning "Redis" or
+    "1M QPS" in an unrelated (non-ML) job can no longer buy a score bump.
+  - CAPABILITY_GROUPS["llm"] gained "nlp" / "natural language processing" —
+    previously these skill entries earned zero skill-level credit anywhere.
+  - Location tiering refined to the JD's actual text ("Candidates in
+    Hyderabad, Pune, Mumbai, Delhi NCR welcome to apply"): Pune/Noida (JD
+    HQ cities) score 1.0, those four named cities score 0.95, other India
+    tech hubs (Bangalore, Chennai, Kolkata — not named either way) score
+    0.90. Previously all of these scored an identical 1.0.
+
+  Net effect on the full 100K dataset (see audit_full.py): the 4 candidates
+  formerly in the top 100 who were outside India, unwilling to relocate,
+  and needed onsite/hybrid work are gone, replaced by 4 verified India-based
+  candidates; honeypot rate, non-tech-title, and pure-consulting best-case
+  ranks all moved 30-130x further from the top-100 cutoff. Top-10 order is
+  otherwise materially unchanged (rank 1 unchanged; largest top-100 mover
+  outside the 4 removed candidates was ~10 positions).
 """
 
 import math
@@ -300,10 +341,16 @@ NON_TECH_TITLES = {
 # A PM with strong ML skills could still appear in the long tail
 WEAK_TITLE_OVERRIDE = {"project manager", "business analyst"}
 
-PREFERRED_LOCATIONS = {
-    "pune", "noida", "hyderabad", "mumbai", "bangalore", "bengaluru",
-    "delhi", "gurugram", "gurgaon", "chennai", "kolkata",
+# JD text, verbatim: "Location: Pune/Noida-preferred but flexible... Candidates
+# in Hyderabad, Pune, Mumbai, Delhi NCR welcome to apply." Bangalore/Chennai/
+# Kolkata are not called out either way — still full India-based candidates,
+# just not the cities the JD explicitly names. Kept as a gentle tiering
+# (location is only 10% of the weighted sum) rather than a penalty.
+HQ_LOCATIONS = {"pune", "noida"}
+JD_WELCOME_LOCATIONS = {
+    "hyderabad", "mumbai", "delhi", "gurugram", "gurgaon",
 }
+OTHER_INDIA_TECH_HUBS = {"bangalore", "bengaluru", "chennai", "kolkata"}
 
 EDUCATION_TIER_SCORES = {
     "tier_1": 1.0,
@@ -907,6 +954,7 @@ def _career_progression_bonus(career):
 
     previous = None
     improvements = 0
+    improvement_durations = []
 
     for job in reversed(career):
 
@@ -920,8 +968,21 @@ def _career_progression_bonus(career):
 
         if previous is not None and level > previous:
             improvements += 1
+            improvement_durations.append(job.get("duration_months", 0) or 0)
 
         previous = level
+
+    if improvements == 0:
+        return 0.0
+
+    # JD explicit disqualifier: "title-chasers" who climb Senior -> Staff ->
+    # Principal by switching companies every ~1.5 years. Title progression
+    # earned by staying and growing into a role is a positive signal; the
+    # same progression earned via a string of sub-18-month stints is exactly
+    # the anti-pattern the JD calls out, so it should not also earn a bonus.
+    avg_duration = sum(improvement_durations) / len(improvement_durations)
+    if improvements >= 2 and avg_duration < 18:
+        return 0.0
 
     return min(improvements * 0.015, 0.06)
 
@@ -1299,10 +1360,16 @@ CAPABILITY_GROUPS = {
             "rag", "haystack", "llm", "prompt engineering", "lora", "qlora",
             "peft", "fine-tuning", "fine tuning", "transformers",
             "hugging face transformers", "hugging face", "langchain", "llamaindex",
+            # NLP itself was previously unrepresented in any capability group
+            # (it only affected title_score's strong-title-terms check), so a
+            # candidate's "NLP" / "Natural Language Processing" skill entries
+            # earned zero skill-level credit no matter how well-endorsed.
+            "nlp", "natural language processing",
         },
         "evidence": {
             "retrieval augmented generation", "rag", "fine tuned", "fine tuning",
             "lora", "qlora", "peft", "llm", "transformers",
+            "nlp", "natural language processing",
         },
     },
 }
@@ -1485,6 +1552,51 @@ PRODUCTION_EVIDENCE_GROUPS = {
     },
 }
 
+# JD explicit disqualifier: "People whose primary expertise is computer
+# vision, speech, or robotics without significant NLP/IR exposure. We
+# respect your work but you'd be re-learning fundamentals here."
+CV_SPEECH_ROBOTICS_TERMS = {
+    "computer vision", "image classification", "object detection",
+    "yolo", "opencv", "cnn", "convolutional neural network",
+    "gan", "gans", "generative adversarial",
+    "diffusion model", "diffusion models",
+    "speech recognition", "asr", "tts", "text to speech", "text-to-speech",
+    "robotics", "autonomous vehicle", "autonomous driving", "slam", "lidar",
+}
+
+
+def _cv_speech_dominant_multiplier(candidate: dict) -> float:
+    """
+    Soft penalty for the CV/speech/robotics-without-NLP/IR profile the JD
+    explicitly says it will not move forward on.
+
+    Matched against career TEXT (title + description across the whole
+    career), not the skills list — a single stray "OpenCV" skill entry
+    shouldn't trigger this; a career genuinely built around CV/speech with
+    zero retrieval/ranking/recommendation evidence anywhere should. This
+    mirrors the category-matching style already used by
+    production_evidence_score() rather than a raw keyword-frequency count.
+    """
+    career = candidate.get("career_history", [])
+    if not career:
+        return 1.0
+
+    full_text = _normalize_match_text(" ".join(
+        f"{job.get('title', '')} {job.get('description', '')}" for job in career
+    ))
+
+    cv_hits = _signal_hits_norm(full_text, CV_SPEECH_ROBOTICS_TERMS)
+    relevant_hits = (
+        _signal_hits_norm(full_text, PRODUCTION_EVIDENCE_GROUPS["retrieval"])
+        + _signal_hits_norm(full_text, PRODUCTION_EVIDENCE_GROUPS["ranking"])
+        + _signal_hits_norm(full_text, PRODUCTION_EVIDENCE_GROUPS["recommendation"])
+    )
+
+    if cv_hits >= 2 and relevant_hits == 0:
+        return 0.80
+    return 1.0
+
+
 PRODUCTION_EVIDENCE_SCALE_PATTERNS = (
     re.compile(
         r"\b\d+(?:\.\d+)?\s*(?:m|million|b|billion)\+?\s*"
@@ -1645,11 +1757,14 @@ def location_score(candidate: dict) -> float:
     work_mode = _norm(signals.get("preferred_work_mode", ""))
 
     if country == "india":
-        in_preferred = any(city in location for city in PREFERRED_LOCATIONS)
-        if in_preferred:
+        if any(city in location for city in HQ_LOCATIONS):
             return 1.0
-        elif willing:
+        elif any(city in location for city in JD_WELCOME_LOCATIONS):
+            return 0.95
+        elif any(city in location for city in OTHER_INDIA_TECH_HUBS):
             return 0.90
+        elif willing:
+            return 0.85
         else:
             return 0.70
     else:
@@ -1718,6 +1833,64 @@ def high_throughput_bonus(candidate: dict) -> float:
         return 1.05
 
     return 1.0
+
+
+def hard_gate_multiplier(candidate: dict, tt: float, cf: float) -> float:
+    """
+    Multiplicative penalty for the three JD-explicit disqualifiers whose
+    component weight alone (12% for title, 8% for company_fit, 10% for
+    location) is not strong enough to keep a candidate who is strong on
+    every OTHER axis out of a top-100 slot:
+
+      - Non-tech current title (Marketing/HR/Accountant/...). title_score()
+        already zeroes the title component, but that is only 12% of the
+        weighted sum — the remaining 88% (skills/career/experience/location/
+        education) is untouched, and career descriptions in this dataset
+        are known to be recycled across unrelated titles (see README), so a
+        "Marketing Manager" can still post a respectable score on paper.
+      - An entire career at a pure consulting firm. The JD says explicitly:
+        "we've had bad fit experiences in both directions."
+      - Based outside India, unwilling to relocate, AND requiring onsite or
+        hybrid work — logistically hard to take the role regardless of fit.
+
+    These are not honeypots (nothing is fabricated/impossible about the
+    profile), so this does not zero the score the way evaluate_integrity()
+    does — it pushes them down the ranking so that no combination of other
+    strengths can pull them into a top-100 slot on their own.
+
+    The location case is deliberately the mildest of the three (0.55, vs.
+    0.15/0.35 for the other two): the JD's own language for it is "case-by-
+    case", not "we will not move forward" (that phrase is reserved for the
+    title/consulting-style disqualifiers), and our own manual-review
+    calibration (rank.md) placed at least one such candidate competitively
+    mid-tier rather than in the deep tail. location_score() already scores
+    this combination at 0.10 within its own 10%-weighted term, so this gate
+    is a top-up on top of an already-low contribution, not the primary
+    penalty mechanism.
+    """
+    gate = 1.0
+
+    # title_score() returns exactly 0.0 only for the hard-disqualifier
+    # bucket; WEAK_TITLE_OVERRIDE roles (PM/BA) return 0.15 and are
+    # deliberately left out of this gate.
+    if tt == 0.0:
+        gate *= 0.15
+
+    # company_fit_score() returns exactly 0.45 only when consulting_count
+    # equals the total number of jobs (pure-consulting career).
+    if cf <= 0.50:
+        gate *= 0.35
+
+    profile = candidate.get("profile", {})
+    signals = candidate.get("redrob_signals", {})
+    if (
+        _norm(profile.get("country", "")) != "india"
+        and not signals.get("willing_to_relocate", True)
+        and _norm(signals.get("preferred_work_mode", "")) in ("onsite", "hybrid")
+    ):
+        gate *= 0.55
+
+    return gate
 
 
 def behavioral_multiplier(candidate: dict) -> float:
@@ -1881,10 +2054,21 @@ def score_candidate(candidate: dict) -> dict:
 
     bm = behavioral_multiplier(candidate)
 
-    # Apply systems-scale bonus for high-throughput engineering
-    throughput_bonus = high_throughput_bonus(candidate)
+    # Systems-scale bonus for high-throughput engineering — gated behind the
+    # same title/skills relevance bar as production_evidence, so mentioning
+    # "Redis" or "1M QPS" in an unrelated (e.g. non-ML) job can't buy a score
+    # bump on its own.
+    throughput_bonus = 1.0
+    if tt >= PRODUCTION_EVIDENCE_TC_GATE and sk >= PRODUCTION_EVIDENCE_SK_GATE:
+        throughput_bonus = high_throughput_bonus(candidate)
 
-    final = base * bm * throughput_bonus
+    # JD-explicit disqualifiers that the weighted sum alone doesn't suppress
+    # hard enough (see hard_gate_multiplier docstring), plus the CV/speech/
+    # robotics-without-NLP/IR profile the JD also explicitly excludes.
+    gate = hard_gate_multiplier(candidate, tt, cf)
+    gate *= _cv_speech_dominant_multiplier(candidate)
+
+    final = base * bm * throughput_bonus * gate
 
     # Integrity reliability adjustment (soft, not hard cap)
     final *= (0.80 + 0.20 * integrity["reliability"])

@@ -67,9 +67,11 @@ def main():
               f"resp:{c['response_rate']:.0%} | salary_max:{c['salary_max']}LPA | "
               f"saved_30d:{c['saved_30d']} | github:{c['github']}{flag}")
         comp = c['components']
-        print(f"  tc:{comp.get('title_career',0):.2f} sk:{comp.get('skills',0):.2f} "
+        print(f"  tt:{comp.get('title',0):.2f} cd:{comp.get('career_domain',0):.2f} "
+              f"cf:{comp.get('company_fit',0):.2f} sk:{comp.get('skills',0):.2f} "
               f"ex:{comp.get('experience',0):.2f} lo:{comp.get('location',0):.2f} "
-              f"ed:{comp.get('education',0):.2f} bm:{c['multiplier']:.2f}")
+              f"ed:{comp.get('education',0):.2f} pe:{comp.get('production_evidence',0):.2f} "
+              f"bm:{c['multiplier']:.2f}")
         print(f"  Reasoning: {c['reasoning'][:120]}")
 
     print("\n" + "="*80)

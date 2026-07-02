@@ -11,7 +11,7 @@ import json
 import streamlit as st
 import pandas as pd
 
-from scorer import score_candidate
+from scorer import score_candidate, WEIGHTS, PRODUCTION_EVIDENCE_MAX_BONUS
 
 st.set_page_config(
     page_title="Redrob Candidate Ranker",
@@ -22,21 +22,26 @@ st.set_page_config(
 # ─── Sidebar ────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("⚙️ Scoring Formula")
-    st.markdown("""
+    st.markdown(f"""
     ```
     score = (
-      0.35 × title/career  +
-      0.30 × skills        +
-      0.15 × experience    +
-      0.10 × location      +
-      0.05 × education     +
-      production_evidence_bonus (up to +0.12)
-    ) × behavioral_multiplier
+      {WEIGHTS['title']:.2f} × title            +
+      {WEIGHTS['career_domain']:.2f} × career_domain    +
+      {WEIGHTS['company_fit']:.2f} × company_fit     +
+      {WEIGHTS['skills']:.2f} × skills           +
+      {WEIGHTS['experience']:.2f} × experience       +
+      {WEIGHTS['location']:.2f} × location         +
+      {WEIGHTS['education']:.2f} × education        +
+      production_evidence_bonus (up to +{PRODUCTION_EVIDENCE_MAX_BONUS:.2f})
+    ) × behavioral_multiplier × throughput_bonus × hard_gate
     ```
-    **v3 updates:** Education 0.10 → 0.05 (JD has no education requirement);
-    production-evidence bonus cap increased 0.07 → 0.12; improved semantic
-    matching for concept-level ranking/retrieval vocabulary (production ML
-    team phrasing now matches IR jargon equivalently).
+    **v4 updates:** explicit hard-gate multipliers for the JD's stated
+    disqualifiers (non-tech title, pure-consulting career, logistically
+    impossible location, CV/speech-without-NLP/IR) that the weighted sum
+    alone didn't suppress hard enough; title-chaser job-hopping no longer
+    earns the progression bonus; NLP added as a scored skill capability;
+    high-throughput bonus now gated behind the same relevance bar as
+    production evidence.
 
     **Skills trust formula** (defeats keyword stuffing):
     ```
@@ -130,11 +135,14 @@ with tab_rank:
                         "country":       p.get("country", "—"),
                         "yoe":           p.get("years_of_experience", 0),
                         "score":         r["score"],
-                        "tc":            r["components"].get("title_career", 0),
+                        "tt":            r["components"].get("title", 0),
+                        "cd":            r["components"].get("career_domain", 0),
+                        "cfit":          r["components"].get("company_fit", 0),
                         "sk":            r["components"].get("skills", 0),
                         "ex":            r["components"].get("experience", 0),
                         "lo":            r["components"].get("location", 0),
                         "ed":            r["components"].get("education", 0),
+                        "pe":            r["components"].get("production_evidence", 0),
                         "bm":            r["multiplier"],
                         "honeypot":      r["is_honeypot"],
                         "open_to_work":  sig.get("open_to_work_flag", False),
@@ -185,11 +193,17 @@ with tab_rank:
         # ── Score breakdown ──────────────────────────────────
         st.subheader("Score Breakdown by Component")
         breakdown = (
-            df[["rank", "candidate_id", "title", "tc", "sk", "ex", "lo", "ed", "bm", "score"]]
+            df[["rank", "candidate_id", "title", "tt", "cd", "cfit", "sk", "ex", "lo", "ed", "pe", "bm", "score"]]
             .rename(columns={
                 "rank": "Rank", "candidate_id": "ID", "title": "Title",
-                "tc": "Title/Career (35%)", "sk": "Skills (30%)",
-                "ex": "Exp (15%)", "lo": "Location (10%)", "ed": "Edu (5%)",
+                "tt": f"Title ({WEIGHTS['title']:.0%})",
+                "cd": f"Career Domain ({WEIGHTS['career_domain']:.0%})",
+                "cfit": f"Company Fit ({WEIGHTS['company_fit']:.0%})",
+                "sk": f"Skills ({WEIGHTS['skills']:.0%})",
+                "ex": f"Exp ({WEIGHTS['experience']:.0%})",
+                "lo": f"Location ({WEIGHTS['location']:.0%})",
+                "ed": f"Edu ({WEIGHTS['education']:.0%})",
+                "pe": f"Prod. Evidence (up to +{PRODUCTION_EVIDENCE_MAX_BONUS:.2f})",
                 "bm": "Behavioral ×", "score": "Final Score",
             })
         )
@@ -217,25 +231,37 @@ with tab_rank:
                     st.markdown(f"**Reasoning:** {row['reasoning']}")
                     st.markdown("**Component Scores:**")
                     comp_df = pd.DataFrame([{
-                        "Component": "Title/Career (35%)",
-                        "Score": f"{row['tc']:.3f}",
-                        "Weighted": f"{row['tc'] * 0.35:.3f}",
+                        "Component": f"Title ({WEIGHTS['title']:.0%})",
+                        "Score": f"{row['tt']:.3f}",
+                        "Weighted": f"{row['tt'] * WEIGHTS['title']:.3f}",
                     }, {
-                        "Component": "Skills (30%)",
+                        "Component": f"Career Domain ({WEIGHTS['career_domain']:.0%})",
+                        "Score": f"{row['cd']:.3f}",
+                        "Weighted": f"{row['cd'] * WEIGHTS['career_domain']:.3f}",
+                    }, {
+                        "Component": f"Company Fit ({WEIGHTS['company_fit']:.0%})",
+                        "Score": f"{row['cfit']:.3f}",
+                        "Weighted": f"{row['cfit'] * WEIGHTS['company_fit']:.3f}",
+                    }, {
+                        "Component": f"Skills ({WEIGHTS['skills']:.0%})",
                         "Score": f"{row['sk']:.3f}",
-                        "Weighted": f"{row['sk'] * 0.30:.3f}",
+                        "Weighted": f"{row['sk'] * WEIGHTS['skills']:.3f}",
                     }, {
-                        "Component": "Experience (15%)",
+                        "Component": f"Experience ({WEIGHTS['experience']:.0%})",
                         "Score": f"{row['ex']:.3f}",
-                        "Weighted": f"{row['ex'] * 0.15:.3f}",
+                        "Weighted": f"{row['ex'] * WEIGHTS['experience']:.3f}",
                     }, {
-                        "Component": "Location (10%)",
+                        "Component": f"Location ({WEIGHTS['location']:.0%})",
                         "Score": f"{row['lo']:.3f}",
-                        "Weighted": f"{row['lo'] * 0.10:.3f}",
+                        "Weighted": f"{row['lo'] * WEIGHTS['location']:.3f}",
                     }, {
-                        "Component": "Education (5%)",
+                        "Component": f"Education ({WEIGHTS['education']:.0%})",
                         "Score": f"{row['ed']:.3f}",
-                        "Weighted": f"{row['ed'] * 0.05:.3f}",
+                        "Weighted": f"{row['ed'] * WEIGHTS['education']:.3f}",
+                    }, {
+                        "Component": f"Production Evidence (up to +{PRODUCTION_EVIDENCE_MAX_BONUS:.2f})",
+                        "Score": f"{row['pe']:.3f}",
+                        "Weighted": f"{row['pe'] * PRODUCTION_EVIDENCE_MAX_BONUS:.3f}",
                     }])
                     st.dataframe(comp_df, use_container_width=True, hide_index=True)
 

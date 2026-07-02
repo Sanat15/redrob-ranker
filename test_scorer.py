@@ -18,6 +18,9 @@ from scorer import (
     behavioral_multiplier,
     score_candidate,
     _skill_trust,
+    _career_progression_bonus,
+    _cv_speech_dominant_multiplier,
+    hard_gate_multiplier,
     REFERENCE_DATE,
 )
 
@@ -554,9 +557,25 @@ class TestExperienceScore:
 class TestLocation:
 
     def test_preferred_cities_score_max(self):
-        for city in ["Pune", "Noida", "Hyderabad", "Mumbai", "Bangalore", "Gurgaon"]:
+        # JD verbatim: "Pune/Noida-preferred" — these are the HQ cities and
+        # the only ones that get the full 1.0.
+        for city in ["Pune", "Noida"]:
             c = make_candidate(country="india", location=city)
             assert location_score(c) == 1.0, f"{city} should score 1.0"
+
+    def test_jd_welcome_cities_score_high_not_max(self):
+        # JD verbatim: "Candidates in Hyderabad, Pune, Mumbai, Delhi NCR
+        # welcome to apply" — explicitly named, but not the HQ cities.
+        for city in ["Hyderabad", "Mumbai", "Delhi", "Gurgaon"]:
+            c = make_candidate(country="india", location=city)
+            assert location_score(c) == pytest.approx(0.95), f"{city} should score 0.95"
+
+    def test_other_india_tech_hubs_score_slightly_lower(self):
+        # Bangalore/Chennai/Kolkata are strong Indian tech hubs but are not
+        # named in the JD's location section either way.
+        for city in ["Bangalore", "Chennai", "Kolkata"]:
+            c = make_candidate(country="india", location=city)
+            assert location_score(c) == pytest.approx(0.90), f"{city} should score 0.90"
 
     def test_india_non_preferred_willing_to_relocate(self):
         c = make_candidate(
@@ -566,7 +585,7 @@ class TestLocation:
                 "willing_to_relocate": True
             }
         )
-        assert location_score(c) == pytest.approx(0.90)
+        assert location_score(c) == pytest.approx(0.85)
 
     def test_india_non_preferred_not_relocating(self):
         c = make_candidate(
@@ -942,3 +961,208 @@ class TestKnownCandidateRegression:
         # 91% response rate should appear
         assert "91%" in result["reasoning"] or "0.91" in result["reasoning"], \
             f"Response rate missing from reasoning: {result['reasoning']}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hard gates for JD-explicit disqualifiers
+#
+# These three profiles ("we will not move forward" language in the JD) were
+# previously only suppressed by losing weight in ONE component (title 12%,
+# company_fit 8%, location 10%) — the other 80-90% of the weighted sum was
+# untouched, and this dataset is known to recycle strong-sounding ML career
+# descriptions across unrelated titles (see README "The problem" section).
+# A full-100K audit found a pure-Accountant profile scoring 0.36 and a
+# pure-consulting-career profile scoring 0.45 — both uncomfortably close to
+# a top-100 cutoff around 0.53. hard_gate_multiplier() closes that gap.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestHardGateMultiplier:
+
+    def test_non_tech_title_gated_hard(self):
+        c = make_candidate(title="Marketing Manager", company="Swiggy")
+        tt = title_score(c)
+        cf = company_fit_score(c)
+        assert tt == 0.0
+        assert hard_gate_multiplier(c, tt, cf) == pytest.approx(0.15)
+
+    def test_weak_title_override_not_gated(self):
+        """Project Manager / Business Analyst get a low title score (0.15)
+        but are NOT the hard non-tech-disqualifier bucket — the JD doesn't
+        explicitly disqualify them, just implies a weaker fit."""
+        c = make_candidate(title="Project Manager", company="Swiggy")
+        tt = title_score(c)
+        cf = company_fit_score(c)
+        assert tt == 0.15
+        assert hard_gate_multiplier(c, tt, cf) == pytest.approx(1.0)
+
+    def test_pure_consulting_career_gated(self):
+        career = [
+            {"company": "TCS", "title": "Senior Software Engineer", "duration_months": 40,
+             "is_current": True, "industry": "IT Services", "company_size": "10001+",
+             "description": "Delivered client projects."},
+            {"company": "Infosys", "title": "Software Engineer", "duration_months": 30,
+             "is_current": False, "industry": "IT Services", "company_size": "10001+",
+             "description": "Delivered client projects."},
+        ]
+        c = make_candidate(title="Senior Software Engineer", career=career)
+        tt = title_score(c)
+        cf = company_fit_score(c)
+        assert cf == pytest.approx(0.45)
+        assert hard_gate_multiplier(c, tt, cf) == pytest.approx(0.35)
+
+    def test_logistically_impossible_location_gated(self):
+        """Outside India, unwilling to relocate, needs onsite — a real but
+        milder gate than title/consulting (JD says "case-by-case" here,
+        not "we will not move forward")."""
+        c = make_candidate(
+            country="usa", location="San Francisco",
+            signals={
+                **make_candidate()["redrob_signals"],
+                "willing_to_relocate": False,
+                "preferred_work_mode": "onsite",
+            },
+        )
+        tt = title_score(c)
+        cf = company_fit_score(c)
+        assert hard_gate_multiplier(c, tt, cf) == pytest.approx(0.55)
+
+    def test_remote_outside_india_not_gated(self):
+        """Same location/relocation profile, but remote-friendly — this is
+        not logistically impossible, so it should not be gated."""
+        c = make_candidate(
+            country="usa", location="San Francisco",
+            signals={
+                **make_candidate()["redrob_signals"],
+                "willing_to_relocate": False,
+                "preferred_work_mode": "remote",
+            },
+        )
+        tt = title_score(c)
+        cf = company_fit_score(c)
+        assert hard_gate_multiplier(c, tt, cf) == pytest.approx(1.0)
+
+    def test_strong_candidate_not_gated(self):
+        c = make_candidate()
+        tt = title_score(c)
+        cf = company_fit_score(c)
+        assert hard_gate_multiplier(c, tt, cf) == pytest.approx(1.0)
+
+    def test_non_tech_title_cannot_buy_score_via_recycled_description(self):
+        """Integration test for the exact trap the README documents: a
+        non-tech title paired with a recycled production-ranking career
+        description must not be able to reach a competitive score just
+        because title is only 12% of the weighted sum."""
+        career = [{
+            "company": "Wayne Enterprises",
+            "title": "Marketing Manager",
+            "duration_months": 60,
+            "is_current": True,
+            "industry": "Marketing",
+            "company_size": "1001-5000",
+            "description": ("Owned the ranking layer for an e-commerce search product, "
+                             "evolving it from a hand-tuned scoring function to a "
+                             "learning-to-rank model. Designed the relevance labeling "
+                             "pipeline and the training/eval workflow."),
+        }]
+        c = make_candidate(title="Marketing Manager", career=career)
+        result = score_candidate(c)
+        assert result["score"] < 0.15, (
+            f"Non-tech-titled candidate scored too high despite a recycled "
+            f"ML description: {result['score']}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CV/speech/robotics-without-NLP/IR — JD explicit disqualifier, previously
+# unimplemented ("People whose primary expertise is computer vision, speech,
+# or robotics without significant NLP/IR exposure.")
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestCvSpeechDominantPenalty:
+
+    def test_cv_dominant_no_ir_evidence_gets_penalized(self):
+        career = [
+            {"company": "Foo", "title": "Computer Vision Engineer", "duration_months": 40,
+             "is_current": True, "industry": "AI/ML", "company_size": "201-500",
+             "description": "Built computer vision models for image classification using "
+                             "YOLO and OpenCV, object detection pipelines."},
+            {"company": "Bar", "title": "ML Engineer", "duration_months": 24,
+             "is_current": False, "industry": "AI/ML", "company_size": "201-500",
+             "description": "Worked on speech recognition and ASR systems, fine-tuned "
+                             "diffusion models for image generation."},
+        ]
+        c = make_candidate(title="Computer Vision Engineer", career=career)
+        assert _cv_speech_dominant_multiplier(c) == pytest.approx(0.80)
+
+    def test_cv_background_with_ir_evidence_not_penalized(self):
+        """A CV background that later shows retrieval/ranking ownership is
+        not the profile the JD excludes — only zero IR/ranking/recsys
+        evidence anywhere in the career triggers the penalty."""
+        career = [
+            {"company": "Foo", "title": "AI Engineer", "duration_months": 40,
+             "is_current": True, "industry": "AI/ML", "company_size": "201-500",
+             "description": "Built computer vision models for image classification using "
+                             "YOLO and OpenCV, then moved into building a semantic search "
+                             "and ranking system for retrieval."},
+        ]
+        c = make_candidate(title="AI Engineer", career=career)
+        assert _cv_speech_dominant_multiplier(c) == pytest.approx(1.0)
+
+    def test_no_career_history_not_penalized(self):
+        c = make_candidate(career=[])
+        assert _cv_speech_dominant_multiplier(c) == pytest.approx(1.0)
+
+    def test_strong_ir_candidate_not_penalized(self):
+        """The default fixture (ranking/search/A-B-testing description) has
+        no CV/speech terms at all, so it must never be gated."""
+        c = make_candidate()
+        assert _cv_speech_dominant_multiplier(c) == pytest.approx(1.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Title-chaser job-hopping — JD explicit disqualifier ("If your career
+# trajectory shows you optimizing for 'Senior' -> 'Staff' -> 'Principal'
+# titles by switching companies every 1.5 years, we're not a fit.")
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestTitleChaserProgression:
+
+    def test_slow_genuine_progression_earns_bonus(self):
+        # career_history convention: most recent job first.
+        career = [
+            {"title": "Senior Machine Learning Engineer", "duration_months": 36, "is_current": True},
+            {"title": "Machine Learning Engineer", "duration_months": 30, "is_current": False},
+        ]
+        assert _career_progression_bonus(career) > 0.0
+
+    def test_fast_job_hopping_earns_no_bonus(self):
+        career = [
+            {"title": "Staff Machine Learning Engineer", "duration_months": 10, "is_current": True},
+            {"title": "Senior Machine Learning Engineer", "duration_months": 14, "is_current": False},
+            {"title": "Machine Learning Engineer", "duration_months": 12, "is_current": False},
+        ]
+        assert _career_progression_bonus(career) == 0.0
+
+    def test_single_job_no_bonus(self):
+        career = [{"title": "Machine Learning Engineer", "duration_months": 24, "is_current": True}]
+        assert _career_progression_bonus(career) == 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NLP as a scored skill capability — previously "NLP" / "Natural Language
+# Processing" skill entries earned zero skill-level credit anywhere (they
+# only affected title_score's strong-title-terms check).
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestNlpSkillCapability:
+
+    def test_nlp_skill_increases_skills_score(self):
+        skills_without_nlp = [
+            {"name": "Python", "proficiency": "expert", "endorsements": 30, "duration_months": 60},
+        ]
+        skills_with_nlp = skills_without_nlp + [
+            {"name": "NLP", "proficiency": "expert", "endorsements": 40, "duration_months": 48},
+        ]
+        c_without = make_candidate(skills=skills_without_nlp)
+        c_with = make_candidate(skills=skills_with_nlp)
+        assert skills_score(c_with) > skills_score(c_without)
